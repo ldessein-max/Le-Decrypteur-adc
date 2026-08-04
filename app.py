@@ -10,7 +10,7 @@ import requests
 import streamlit as st
 
 # ==========================================
-# 1. CONFIGURATION STREAMLIT & STYLES (Branding ADC)
+# 1. CONFIGURATION STREAMLIT & STYLES (ADC)
 # ==========================================
 st.set_page_config(
     page_title="Le Décrypteur ADC",
@@ -133,7 +133,7 @@ if not check_auth():
     st.stop()
 
 # ==========================================
-# 3. CONFIGURATION SYNCHROTEAM & HISTORIQUE
+# 3. SYNCHROTEAM & HISTORIQUE
 # ==========================================
 SYNCHROTEAM_DOMAIN = st.secrets["SYNCHROTEAM_DOMAIN"]
 SYNCHROTEAM_API_KEY = st.secrets["SYNCHROTEAM_API_KEY"]
@@ -202,28 +202,19 @@ def fetch_job_types_map():
             if res.status_code == 200:
                 data = res.json()
                 records = data.get("data", []) if isinstance(data, dict) else data
-                
                 if not records:
                     break
-                
                 for item in records:
                     if isinstance(item, dict) and "name" in item and "id" in item:
                         clean_key = normalize_string(item["name"])
                         job_types_map[clean_key] = item["id"]
-                
                 if len(records) < page_size:
                     break
-                
                 page += 1
             else:
                 break
         except Exception:
             break
-
-    if job_types_map:
-        st.toast(f"{len(job_types_map)} types d'interventions chargés", icon="✅")
-    else:
-        st.error("⚠️ Impossible de récupérer la liste des types Synchroteam.")
 
     return job_types_map
 
@@ -267,14 +258,13 @@ def get_or_create_customer(pdf_client_name):
     return None
 
 # ==========================================
-# 4. PARSER PDF (RECONSTRUCTION STRICTE PAR PHASE)
+# 4. PARSER PDF (PAR PHASE STRICTE)
 # ==========================================
 def parse_pdf_file(uploaded_file):
     site_info = {"client": "", "name": "", "myid": "", "address": "", "zip": "", "city": ""}
     g_objs_list = []
     uv_objs = {}
     suivi_zones = {}
-    j_procs = []
     process_names = []
 
     with pdfplumber.open(uploaded_file) as pdf:
@@ -304,42 +294,39 @@ def parse_pdf_file(uploaded_file):
             site_info["name"] = uploaded_file.name.split(".")[0]
 
         target_page = pdf.pages[-1]
-        
-        # Extraction structurée par tableaux PDF
         tables = target_page.extract_tables()
-        current_zse = None
+
+        current_phase = "Phase 1"
 
         for table in tables:
             for row in table:
                 if not row or not any(row):
                     continue
                 
-                # Nettoyage des cellules
                 cell_zse = row[0].strip() if len(row) > 0 and row[0] else ""
-                cell_obj = row[2].strip() if len(row) > 2 and row[2] else ""
                 full_row_text = " ".join([c for c in row if c])
 
-                # Mettre à jour la ZSE si une nouvelle phase/zone apparaît dans la première colonne
-                if cell_zse and ("SUIVI DE CHANTIER" in cell_zse.upper() or "PHASE" in cell_zse.upper()):
-                    current_zse = re.sub(r"\s+", " ", cell_zse).strip()
+                phase_m = re.search(r"(Phase\s*\d+|ZSE\s*\d+)", cell_zse or full_row_text, re.IGNORECASE)
+                if phase_m:
+                    current_phase = phase_m.group(1).title()
 
-                # Recherche des mesures (N(1), Q(1), R(1), L(2), etc.)
+                if current_phase not in suivi_zones:
+                    suivi_zones[current_phase] = {"measures": {}, "j_proc": 0}
+
                 codes_found = re.findall(r"\b([A-Z]+(?:-[A-Z0-9]+)?)\s*\(\s*(\d+)\s*\)", full_row_text)
                 for code, qty_str in codes_found:
                     qty = int(qty_str)
+                    
                     if code.startswith("G"):
                         g_objs_list.append({code: qty})
                     elif any(code.startswith(letter) for letter in ["U", "V", "X", "Y"]):
                         uv_objs[code] = qty
                     elif code == "J-PROC":
-                        j_procs.append(qty)
+                        suivi_zones[current_phase]["j_proc"] += qty
                     else:
-                        active_key = current_zse if current_zse else "SUIVI DE CHANTIER"
-                        if active_key not in suivi_zones:
-                            suivi_zones[active_key] = {}
-                        suivi_zones[active_key][code] = suivi_zones[active_key].get(code, 0) + qty
+                        measures = suivi_zones[current_phase]["measures"]
+                        measures[code] = measures.get(code, 0) + qty
 
-                # Capture du libellé exact du processus
                 if "PROCESSUS" in full_row_text.upper():
                     proc_m = re.search(r"(PROCESSUS\s*N°\s*\d+\s*:[^\n]+)", full_row_text, re.IGNORECASE)
                     if proc_m:
@@ -348,34 +335,16 @@ def parse_pdf_file(uploaded_file):
                         if proc_clean and proc_clean not in process_names:
                             process_names.append(proc_clean)
 
-        # Mode de secours en texte brut si l'extraction de tableau est vide
-        if not suivi_zones:
-            lines = (target_page.extract_text() or "").split("\n")
-            current_zse = None
-            for line in lines:
-                line_str = line.strip()
-                if "SUIVI DE CHANTIER" in line_str.upper():
-                    current_zse = re.sub(r"\s+[A-Z]\(\d+\).*", "", line_str).strip()
-
-                codes_found = re.findall(r"\b([A-Z]+(?:-[A-Z0-9]+)?)\s*\(\s*(\d+)\s*\)", line_str)
-                for code, qty_str in codes_found:
-                    qty = int(qty_str)
-                    if not code.startswith("G") and not code == "J-PROC" and not any(code.startswith(l) for l in ["U", "V", "X", "Y"]):
-                        active_key = current_zse if current_zse else "SUIVI DE CHANTIER"
-                        if active_key not in suivi_zones:
-                            suivi_zones[active_key] = {}
-                        suivi_zones[active_key][code] = suivi_zones[active_key].get(code, 0) + qty
-
-    suivi_zones = {k: v for k, v in suivi_zones.items() if v}
-    return site_info, g_objs_list, suivi_zones, j_procs, uv_objs, process_names
+    suivi_zones = {k: v for k, v in suivi_zones.items() if v["measures"] or v["j_proc"] > 0}
+    return site_info, g_objs_list, suivi_zones, uv_objs, process_names
 
 # ==========================================
-# 5. TRAITEMENT ET SYNCHROTEAM
+# 5. TRAITEMENT SYNCHROTEAM
 # ==========================================
 def process_single_pdf(uploaded_file, job_types_map, user_email):
     logs = []
     created_jobs_count = 0
-    site_info, g_objs_list, suivi_zones, j_procs, uv_objs, process_names = parse_pdf_file(uploaded_file)
+    site_info, g_objs_list, suivi_zones, uv_objs, process_names = parse_pdf_file(uploaded_file)
     
     logs.append(f"📄 **Fichier :** `{uploaded_file.name}`")
     logs.append(f"📍 **Dossier :** `{site_info['name']}` (Réf.: `{site_info['myid']}`)")
@@ -410,33 +379,34 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
 
     interventions_to_create = []
 
-    # 1. G : Pose G + Dépose G
+    # 1. Pose G / Dépose G
     for g_item in g_objs_list:
         desc_g = " / ".join([f"{k}: {v}" for k, v in g_item.items()])
         interventions_to_create.append({"type_name": "Pose G", "description": desc_g})
         interventions_to_create.append({"type_name": "Dépose G", "description": desc_g})
 
-    # 2. Suivi : Découpage exact par Zone / Phase
+    # 2. Suivis 4h par Phase
     suivi_type_label = "Suivi 4h - Enviro + opé + MES + Mat"
-    total_j_proc = sum(j_procs) if j_procs else 0
-    j_proc_line = f"+ J-PROC ({total_j_proc})" if total_j_proc > 0 else ""
     proc_list_str = "\n".join(process_names) if process_names else ""
 
-    for zse_label, objs in suivi_zones.items():
-        if objs:
-            measures_str = " / ".join([f"{k}: {v}" for k, v in objs.items()])
-            desc_lines = [f"{zse_label} : {measures_str}"]
-            if j_proc_line: 
-                desc_lines.append(j_proc_line)
-            if proc_list_str: 
-                desc_lines.append(proc_list_str)
+    for phase_label, phase_data in suivi_zones.items():
+        measures_dict = phase_data["measures"]
+        j_proc_qty = phase_data["j_proc"]
 
-            interventions_to_create.append({
-                "type_name": suivi_type_label,
-                "description": "\n".join(desc_lines)
-            })
+        measures_str = " / ".join([f"{k}: {v}" for k, v in measures_dict.items()])
+        desc_lines = [f"{phase_label} : {measures_str}"]
+        
+        if j_proc_qty > 0:
+            desc_lines.append(f"+ J-PROC ({j_proc_qty})")
+        if proc_list_str:
+            desc_lines.append(proc_list_str)
 
-    # 3. U, V, X, Y : Pose + Dépose
+        interventions_to_create.append({
+            "type_name": suivi_type_label,
+            "description": "\n".join(desc_lines)
+        })
+
+    # 3. U, V, X, Y
     if uv_objs:
         by_category = {}
         for code, qty in uv_objs.items():
@@ -448,7 +418,6 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
             interventions_to_create.append({"type_name": f"Pose {cat}", "description": desc_cat})
             interventions_to_create.append({"type_name": f"Dépose {cat}", "description": desc_cat})
 
-    # Envoi Synchroteam
     for job in interventions_to_create:
         target_clean = normalize_string(job["type_name"])
         job_type_id = job_types_map.get(target_clean)
@@ -486,9 +455,8 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
     return True, f"Dossier **{site_info['name']}** traité avec succès !", logs, created_jobs_count
 
 # ==========================================
-# 6. INTERFACE STREAMLIT
+# 6. INTERFACE UTILISATEUR
 # ==========================================
-
 with st.sidebar:
     try:
         st.image("ACD_WEB_RVB.png", use_container_width=True)
@@ -503,11 +471,7 @@ with st.sidebar:
 
 header_col1, header_col2 = st.columns([3, 1])
 with header_col1:
-    st.markdown(
-        '<div class="main-title"><span class="highlight-letter">L</span>e '
-        '<span class="highlight-letter">D</span>écrypteur - ADC</div>', 
-        unsafe_allow_html=True
-    )
+    st.markdown('<div class="main-title"><span class="highlight-letter">L</span>e <span class="highlight-letter">D</span>écrypteur - ADC</div>', unsafe_allow_html=True)
     st.caption("Importation et création automatique d'interventions Synchroteam")
 with header_col2:
     try:
@@ -525,9 +489,6 @@ with col1:
     st.metric("Statut API", "Connecté", delta=f"{len(job_types_map)} types")
 with col2: 
     st.metric("Dossiers (48h)", len(load_history()))
-
-with st.expander("🔍 Vérification des types d'interventions chargés"):
-    st.json(job_types_map)
 
 st.write("---")
 
