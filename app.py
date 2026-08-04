@@ -224,7 +224,14 @@ def get_or_create_customer(pdf_client_name):
 
 def resolve_job_type_id(target_label, job_types_map):
     target_clean = normalize_string(target_label)
-    return job_types_map.get(target_clean)
+    if target_clean in job_types_map:
+        return job_types_map[target_clean]
+    
+    # Sécurité supplémentaire pour les variantes d'espaces
+    for name_clean, type_id in job_types_map.items():
+        if name_clean == target_clean:
+            return type_id
+    return None
 
 # ==========================================
 # 4. PARSER DE PDF
@@ -388,12 +395,9 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         for cat, list_measures in by_category.items():
             desc_cat = " / ".join(list_measures)
             
-            if cat == "V":
-                pose_label = "Pose de V sur 4h"
-                depose_label = "Dépose V de 4h"
-            else:
-                pose_label = f"Pose {cat}"
-                depose_label = f"Dépose {cat}"
+            # Correction stricte des libellés de types pour Synchroteam
+            pose_label = f"Pose {cat}"
+            depose_label = f"Dépose {cat}"
             
             interventions_to_create.append({"type_name": pose_label, "description": desc_cat})
             interventions_to_create.append({"type_name": depose_label, "description": desc_cat})
@@ -412,7 +416,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
             job_payload["typeId"] = int(job_type_id)
             logs.append(f"⚙️ `[{job['type_name']}]` -> ID appliqué : `{job_type_id}`")
         else:
-            logs.append(f"⚠️ `[{job['type_name']}]` -> ID INTROUVABLE DANS L'API")
+            logs.append(f"⚠️ `[{job['type_name']}]` -> ID INTROUVABLE DANS L'API (Vérifiez le nom exact dans Synchroteam)")
 
         res_job = safe_post(build_url("/job/send"), job_payload)
         if res_job and res_job.status_code in [200, 201]:
