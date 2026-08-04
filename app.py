@@ -1,6 +1,6 @@
 import re
 import requests
-import fitz  # PyMuPDF pour lire le PDF
+import pdfplumber
 import streamlit as st
 
 # -------------------------------------------------------------------
