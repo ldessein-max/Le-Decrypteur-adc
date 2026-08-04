@@ -223,7 +223,7 @@ def get_or_create_customer(pdf_client_name):
         return None
 
 # ==========================================
-# 4. PARSER DE PDF DYNAMIQUE
+# 4. PARSER DE PDF DYNAMIQUE (CORRIGÉ)
 # ==========================================
 def parse_pdf_file(uploaded_file):
     site_info = {
@@ -235,7 +235,7 @@ def parse_pdf_file(uploaded_file):
         "city": ""
     }
     
-    g_objs = {}
+    g_objs_list = []  # Utilisation d'une liste pour ne pas écraser les doublons de G (#ZSE1, #ZSE2...)
     uv_objs = {}
     suivi_zones = {}
     j_procs = []
@@ -285,6 +285,7 @@ def parse_pdf_file(uploaded_file):
         current_zone = "Zone 1"
 
         for line in lines:
+            # Mise à jour de la zone active AVANT le parsing des codes de la ligne
             zone_match = re.search(r"\b(Zone\s*\d+)\b", line, re.IGNORECASE)
             if zone_match:
                 current_zone = zone_match.group(1).title()
@@ -297,13 +298,14 @@ def parse_pdf_file(uploaded_file):
                 qty = int(qty_str)
 
                 if code.startswith("G"):
-                    g_objs[code] = qty
+                    g_objs_list.append({code: qty})
                 elif any(code.startswith(letter) for letter in ["U", "V", "X", "Y"]):
                     uv_objs[code] = qty
                 elif code == "J-PROC":
                     j_procs.append(qty)
                 else:
-                    suivi_zones[current_zone][code] = qty
+                    # Accumulation correcte au lieu d'écraser
+                    suivi_zones[current_zone][code] = suivi_zones[current_zone].get(code, 0) + qty
 
             if "PROCEDURE" in line.upper() or "PROC" in line.upper():
                 proc_clean = line.strip()
@@ -311,7 +313,7 @@ def parse_pdf_file(uploaded_file):
                     process_names.append(proc_clean)
 
     suivi_zones = {k: v for k, v in suivi_zones.items() if v}
-    return site_info, g_objs, suivi_zones, j_procs, uv_objs, process_names
+    return site_info, g_objs_list, suivi_zones, j_procs, uv_objs, process_names
 
 # ==========================================
 # 5. TRAITEMENT & SYNCHROTEAM
@@ -319,7 +321,7 @@ def parse_pdf_file(uploaded_file):
 def process_single_pdf(uploaded_file, job_types_map, user_email):
     logs = []
     created_jobs_count = 0
-    site_info, g_objs, suivi_zones, j_procs, uv_objs, process_names = parse_pdf_file(uploaded_file)
+    site_info, g_objs_list, suivi_zones, j_procs, uv_objs, process_names = parse_pdf_file(uploaded_file)
     
     logs.append(f"📄 **Fichier :** `{uploaded_file.name}`")
     logs.append(f"👤 **Client :** `{site_info['client']}`")
@@ -353,8 +355,9 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
     # Interventions
     interventions_to_create = []
 
-    if g_objs:
-        desc_g = " / ".join([f"{k}: {v}" for k, v in g_objs.items()])
+    # Traitement distinct de chaque ligne G trouvee
+    for g_item in g_objs_list:
+        desc_g = " / ".join([f"{k}: {v}" for k, v in g_item.items()])
         interventions_to_create.append({"type_name": "POSE G", "description": desc_g})
         interventions_to_create.append({"type_name": "DÉPOSE G", "description": desc_g})
 
