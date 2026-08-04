@@ -10,7 +10,7 @@ st.set_page_config(
     layout="centered"
 )
 
-# 2. Injection CSS pour le design moderne et personnalisé
+# 2. Injection CSS pour le design moderne (Correction du paramètre unsafe_allow_html)
 st.markdown("""
     <style>
     /* Fond principal de l'application */
@@ -69,7 +69,7 @@ st.markdown("""
         border: 2px dashed #004B87;
     }
     </style>
-""", unsafe_allowed_html=True)
+""", unsafe_allow_html=True)
 
 # 3. Authentification obligatoire (@adc-labo.fr)
 def check_email():
@@ -80,7 +80,7 @@ def check_email():
     if not st.session_state["authenticated"]:
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            st.markdown('<div class="login-card">', unsafe_allowed_html=True)
+            st.markdown('<div class="login-card">', unsafe_allow_html=True)
             try:
                 st.image("ACD_WEB_RVB.png", use_container_width=True)
             except Exception:
@@ -107,7 +107,7 @@ def check_email():
                     st.session_state["user_email"] = email_clean
                     st.rerun()
             
-            st.markdown('</div>', unsafe_allowed_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
         return False
     return True
 
@@ -187,10 +187,10 @@ if check_email():
         return job_types
 
     # Zone de dépôt du PDF
-    st.markdown('<div class="custom-card">', unsafe_allowed_html=True)
+    st.markdown('<div class="custom-card">', unsafe_allow_html=True)
     st.subheader("📄 Dépôt du rapport PDF")
     uploaded_file = st.file_uploader("Glissez-déposez votre stratégie PDF ci-dessous :", type=["pdf"])
-    st.markdown('</div>', unsafe_allowed_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
     if uploaded_file is not None:
         text = extract_text_from_pdf(uploaded_file)
@@ -202,6 +202,6 @@ if check_email():
         except Exception as e:
             st.error(f"Erreur de connexion Synchroteam : {e}")
 
-        st.markdown("<br>", unsafe_allowed_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
         if st.button("🚀 Lancer la création des interventions"):
-            st.warning("Traitement et synchronisation avec Synchroteam en cours...")
+            st.write("Traitement en cours...")
