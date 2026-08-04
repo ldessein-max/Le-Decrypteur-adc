@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 from datetime import datetime, timedelta
 import pdfplumber
 import requests
@@ -102,6 +103,20 @@ HEADERS = {
     "Accept": "application/json",
 }
 
+def normalize_string(text):
+    """
+    Nettoyage ultra-strict des espaces (y compris espaces insecables \xa0 / \u202f),
+    des majuscules et de la forme unicode pour garantir l'égalité.
+    """
+    if not text:
+        return ""
+    # 1. Normalisation unicode (accents)
+    text = unicodedata.normalize('NFKC', str(text))
+    # 2. Remplacement de TOUS les espaces invisibles/insecables par des espaces standard (ASCII 32)
+    text = re.sub(r"[\s\xa0\u200b\u202f]+", " ", text)
+    # 3. Suppression des espaces de début/fin et passage en majuscules
+    return text.strip().upper()
+
 def build_url(endpoint):
     return f"{BASE_URL}{endpoint}"
 
@@ -141,23 +156,21 @@ def save_history_entry(entry):
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
 
-@st.cache_data(ttl=3600)
 def fetch_job_types_map():
     job_types_map = {}
     page = 1
     while True:
-        url = build_url(f"/job/type/list?page={page}&pageSize=50")
+        url = build_url(f"/job/type/list?page={page}&pageSize=100")
         try:
             res = requests.get(url, headers=HEADERS, timeout=10)
             if res.status_code == 200:
                 data = res.json()
                 records = data.get("data", [])
                 for item in records:
-                    # Stocke exactement le nom retourné par Synchroteam (en majuscules pour comparaison stricte)
-                    clean_name = item["name"].strip().upper()
+                    clean_name = normalize_string(item["name"])
                     job_types_map[clean_name] = item["id"]
 
-                if page * 50 >= data.get("recordsTotal", 0):
+                if page * 100 >= data.get("recordsTotal", 0) or not records:
                     break
                 page += 1
             else:
@@ -168,7 +181,6 @@ def fetch_job_types_map():
     return job_types_map
 
 def find_existing_site_by_myid(myid):
-    """Recherche si un site existe déjà via son numéro de dossier personnalisé (myId)."""
     search_url = build_url(f"/site/list?myId={requests.utils.quote(myid)}")
     try:
         res = requests.get(search_url, headers=HEADERS, timeout=10)
@@ -176,7 +188,7 @@ def find_existing_site_by_myid(myid):
             data = res.json()
             sites = data.get("data", []) if isinstance(data, dict) else data
             for site in sites:
-                if site.get("myId", "").strip().upper() == myid.strip().upper():
+                if normalize_string(site.get("myId", "")) == normalize_string(myid):
                     return site.get("id"), site.get("customerId")
     except Exception:
         pass
@@ -191,7 +203,7 @@ def get_or_create_customer(pdf_client_name):
             clients = data.get("data", []) if isinstance(data, dict) else data
 
             for c in clients:
-                if c.get("name", "").strip().upper() == pdf_client_name.strip().upper():
+                if normalize_string(c.get("name", "")) == normalize_string(pdf_client_name):
                     return c.get("id")
     except Exception as e:
         st.warning(f"Note recherche client : {e}")
@@ -212,8 +224,7 @@ def get_or_create_customer(pdf_client_name):
     return None
 
 def resolve_job_type_id(target_label, job_types_map):
-    """Mappe directement vers l'ID exact récupéré de l'API Synchroteam."""
-    target_clean = target_label.strip().upper()
+    target_clean = normalize_string(target_label)
     return job_types_map.get(target_clean)
 
 # ==========================================
@@ -244,7 +255,6 @@ def parse_pdf_file(uploaded_file):
         if client_m:
             site_info["client"] = client_m.group(1).strip()
 
-        # Extraire le DOSSIER N° : 2607-107 (PDRE P2026071702Q - 26-015)
         dossier_m = re.search(r"DOSSIER\s*N°\s*:\s*([^\n(]+)\s*\(([^)]+)\)", full_text, re.IGNORECASE)
         if dossier_m:
             site_info["name"] = dossier_m.group(1).strip()
@@ -309,7 +319,6 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
     logs.append(f"📄 **Fichier :** `{uploaded_file.name}`")
     logs.append(f"📍 **Dossier :** `{site_info['name']}` (Réf.: `{site_info['myid']}`)")
 
-    # 1. Recherche du site existant par son myId exact
     site_id, customer_id = find_existing_site_by_myid(site_info["myid"])
     site_existed = False
 
@@ -317,7 +326,6 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         site_existed = True
         logs.append(f"🔗 **Site existant trouvé** (ID: `{site_id}`). Rattachement direct...")
     else:
-        # 2. Création si non trouvé
         logs.append("🔍 Site non trouvé. Création du dossier...")
         customer_id = get_or_create_customer(site_info["client"])
         if not customer_id:
@@ -341,7 +349,6 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         site_id = res_site.json().get("id")
         logs.append(f"✅ Nouveau site créé dans Synchroteam (ID: `{site_id}`)")
 
-    # 3. Création des interventions avec les EXACTES CORRESPONDANCES SYNCHROTEAM
     interventions_to_create = []
 
     # G
@@ -370,7 +377,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
                 "description": "\n".join(desc_lines)
             })
 
-    # U, V, X, Y (Mapping dynamique sur les libellés exacts)
+    # U, V, X, Y
     if uv_objs:
         by_category = {}
         for code, qty in uv_objs.items():
@@ -382,9 +389,12 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         for cat, list_measures in by_category.items():
             desc_cat = " / ".join(list_measures)
             
-            # Gestion explicite des cas spécifiques (ex: Pose de V sur 4h vs Pose V)
-            pose_label = "Pose de V sur 4h" if cat == "V" and "Pose de V sur 4h" in [k.title() for k in job_types_map.keys()] else f"Pose {cat}"
-            depose_label = "Dépose V de 4h" if cat == "V" and "Dépose V de 4h" in [k.title() for k in job_types_map.keys()] else f"Dépose {cat}"
+            if cat == "V":
+                pose_label = "Pose de V sur 4h"
+                depose_label = "Dépose V de 4h"
+            else:
+                pose_label = f"Pose {cat}"
+                depose_label = f"Dépose {cat}"
             
             interventions_to_create.append({"type_name": pose_label, "description": desc_cat})
             interventions_to_create.append({"type_name": depose_label, "description": desc_cat})
@@ -400,15 +410,16 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         
         if job_type_id:
             job_payload["type"] = {"id": job_type_id}
+            logs.append(f"⚙️ `[{job['type_name']}]` -> ID OK : `{job_type_id}`")
+        else:
+            logs.append(f"⚠️ `[{job['type_name']}]` -> ID NON TROUVÉ")
 
         res_job = safe_post(build_url("/job/send"), job_payload)
         if res_job and res_job.status_code in [200, 201]:
-            logs.append(f"⚙️ Intervention `{job['type_name']}` créée (Type ID: `{job_type_id}`).")
             created_jobs_count += 1
         else:
-            logs.append(f"❌ Erreur création intervention `{job['type_name']}`")
+            logs.append(f"❌ Erreur API Synchroteam pour `{job['type_name']}`")
 
-    # Enregistrement historique
     history_entry = {
         "timestamp": datetime.now().isoformat(),
         "date_str": datetime.now().strftime("%d/%m/%Y %H:%M"),
