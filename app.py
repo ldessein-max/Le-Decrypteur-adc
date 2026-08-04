@@ -1,33 +1,34 @@
 import re
+import datetime
 import streamlit as st
 import requests
 import pdfplumber
 
 # 1. Configuration de la page
 st.set_page_config(
-    page_title="Le Décrypteur ADC", 
+    page_title="Le Décrypteur - ADC", 
     page_icon="🦛", 
-    layout="centered"
+    layout="wide"
 )
 
-# 2. Injection CSS pour le design moderne (Correction du paramètre unsafe_allow_html)
+# Initialisation de l'historique dans la session
+if "history" not in st.session_state:
+    st.session_state["history"] = []
+
+# 2. Injection CSS personnalisé (Branding ADC)
 st.markdown("""
     <style>
-    /* Fond principal de l'application */
     .stApp {
         background-color: #F8F9FA;
     }
-    
-    /* Cartes personnalisées */
     .custom-card {
         background-color: #FFFFFF;
-        padding: 2rem;
+        padding: 1.8rem;
         border-radius: 12px;
         box-shadow: 0 4px 15px rgba(0, 0, 0, 0.05);
         border-left: 6px solid #8DB600;
         margin-bottom: 1.5rem;
     }
-    
     .login-card {
         background-color: #FFFFFF;
         padding: 2.5rem;
@@ -36,14 +37,25 @@ st.markdown("""
         border-top: 6px solid #004B87;
         text-align: center;
     }
-
-    /* Titres et textes */
     h1, h2, h3 {
         color: #004B87 !important;
         font-weight: 700 !important;
     }
-    
-    /* Style du bouton principal */
+    .main-title {
+        font-size: 2.3rem;
+        font-weight: 700;
+        color: #004B87;
+        margin-bottom: 0px;
+    }
+    .highlight-letter {
+        color: #8DB600;
+        font-weight: 900;
+    }
+    .hippo-badge {
+        font-size: 2.2rem;
+        text-align: center;
+        margin-top: -5px;
+    }
     .stButton>button {
         background-color: #004B87 !important;
         color: white !important;
@@ -54,14 +66,10 @@ st.markdown("""
         transition: all 0.3s ease !important;
         width: 100%;
     }
-    
     .stButton>button:hover {
         background-color: #8DB600 !important;
         color: white !important;
-        transform: translateY(-2px);
     }
-    
-    /* Zone de file uploader */
     [data-testid="stFileUploader"] {
         background-color: #FFFFFF;
         border-radius: 12px;
@@ -114,7 +122,7 @@ def check_email():
 # 4. Application Principale
 if check_email():
 
-    # Barre latérale (Sidebar) pour le profil et la déconnexion
+    # Sidebar : Profil + Historique récent
     with st.sidebar:
         try:
             st.image("ACD_WEB_RVB.png", use_container_width=True)
@@ -122,33 +130,46 @@ if check_email():
             pass
         st.write("---")
         st.markdown(f"👤 **Utilisateur :**\n`{st.session_state['user_email']}`")
+        
+        st.write("---")
+        st.subheader("📜 Activité récente")
+        if not st.session_state["history"]:
+            st.caption("Aucune action enregistrée.")
+        else:
+            for log in reversed(st.session_state["history"][-5:]):
+                st.markdown(f"**{log['date']}**\n- `{log['filename']}`")
+                st.caption(f"Auteur : {log['user']}")
+                st.write("---")
+
         if st.button("Se déconnecter"):
             st.session_state["authenticated"] = False
             st.session_state["user_email"] = ""
             st.rerun()
 
-    # En-tête de page
+    # En-tête de page avec le nom stylisé et l'hippopotame sous le logo
     col_title, col_logo = st.columns([3, 1])
-
     with col_title:
-        st.title("Le Décrypteur ADC")
+        st.markdown(
+            '<div class="main-title"><span class="highlight-letter">L</span>e '
+            '<span class="highlight-letter">D</span>écrypteur - ADC</div>', 
+            unsafe_allow_html=True
+        )
         st.caption("Génération automatisée des interventions Synchroteam")
-
     with col_logo:
         try:
             st.image("ACD_WEB_RVB.png", use_container_width=True)
         except Exception:
             st.caption("[Logo ADC Labo]")
+        st.markdown('<div class="hippo-badge">🦛</div>', unsafe_allow_html=True)
 
     st.write("---")
 
-    # Configuration API Synchroteam
+    # API Synchroteam setup
     DOMAIN = st.secrets.get("SYNCHROTEAM_DOMAIN", "mon-domaine")
     API_KEY = st.secrets.get("SYNCHROTEAM_API_KEY", "ma-cle-api")
     BASE_URL = f"https://{DOMAIN}.synchroteam.com/api/v3"
     AUTH = (DOMAIN, API_KEY)
 
-    # Fonctions Utilitaires
     def extract_text_from_pdf(uploaded_file):
         text = ""
         with pdfplumber.open(uploaded_file) as pdf:
@@ -171,37 +192,49 @@ if check_email():
             items = data.get("categoryList", []) or data.get("jobTypeList", []) or data
             if isinstance(data, dict) and "data" in data:
                 items = data["data"]
-            
             if not items:
                 break
-                
             for item in items:
                 name = item.get("name") or item.get("label")
                 id_val = item.get("id")
                 if name and id_val:
                     job_types[name.strip().lower()] = id_val
-                    
             if len(items) < 25:
                 break
             page += 1
         return job_types
 
-    # Zone de dépôt du PDF
-    st.markdown('<div class="custom-card">', unsafe_allow_html=True)
-    st.subheader("📄 Dépôt du rapport PDF")
-    uploaded_file = st.file_uploader("Glissez-déposez votre stratégie PDF ci-dessous :", type=["pdf"])
-    st.markdown('</div>', unsafe_allow_html=True)
+    # Onglets d'organisation
+    tab1, tab2 = st.tabs(["🚀 Traitement PDF", "📊 Historique Complet"])
 
-    if uploaded_file is not None:
-        text = extract_text_from_pdf(uploaded_file)
-        st.success("✅ Fichier PDF analysé avec succès !")
-        
-        try:
-            types_map = get_all_job_types()
-            st.info(f"⚡ **{len(types_map)} types d'interventions** récupérés depuis Synchroteam.")
-        except Exception as e:
-            st.error(f"Erreur de connexion Synchroteam : {e}")
+    with tab1:
+        st.subheader("📄 Dépôt du rapport PDF")
+        uploaded_file = st.file_uploader("Glissez-déposez votre stratégie PDF ci-dessous :", type=["pdf"])
 
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("🚀 Lancer la création des interventions"):
-            st.write("Traitement en cours...")
+        if uploaded_file is not None:
+            text = extract_text_from_pdf(uploaded_file)
+            st.success("✅ Fichier PDF analysé avec succès !")
+            
+            try:
+                types_map = get_all_job_types()
+                st.info(f"⚡ **{len(types_map)} types d'interventions** récupérés depuis Synchroteam.")
+            except Exception as e:
+                st.error(f"Erreur de connexion Synchroteam : {e}")
+
+            if st.button("🚀 Lancer la création des interventions"):
+                now_str = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
+                st.session_state["history"].append({
+                    "date": now_str,
+                    "user": st.session_state["user_email"],
+                    "filename": uploaded_file.name,
+                    "status": "Créé avec succès"
+                })
+                st.success(f"Traitement terminé pour `{uploaded_file.name}`. Action enregistrée.")
+                st.rerun()
+
+    with tab2:
+        st.subheader("📋 Journal de traçabilité")
+        if not st.session_state["history"]:
+            st.info("Aucun traitement n'a été effectué durant cette session.")
+        else:
+            st.table(st.session_state["history"])
