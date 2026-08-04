@@ -211,21 +211,21 @@ def get_or_create_customer(pdf_client_name):
     return None
 
 def resolve_job_type_id(target_name, job_types_map):
-    """Recherche exacte puis par mot-clé précis pour éviter d'assigner 'Suivi 4h' par erreur."""
+    """Résolution stricte du type d'intervention."""
     target_clean = target_name.strip().upper()
     
     # 1. Correspondance exacte
     if target_clean in job_types_map:
         return job_types_map[target_clean]
-    
-    # 2. Correspondance stricte sur les mots-clés (ex: POSE G / DÉPOSE U)
-    parts = target_clean.split()
-    if len(parts) >= 2:
-        action, code = parts[0], parts[1] # ex: POSE, G
-        for name, tid in job_types_map.items():
-            if action in name and f" {code}" in name:
-                return tid
-                
+
+    # 2. Recherche par correspondance d'éléments exacts (ex: "POSE" et "G")
+    target_words = set(target_clean.split())
+    for name, tid in job_types_map.items():
+        name_words = set(name.upper().split())
+        # Si tous les mots de l'intervention cible sont présents dans le nom Synchroteam
+        if target_words.issubset(name_words):
+            return tid
+
     return None
 
 # ==========================================
@@ -406,7 +406,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
 
         res_job = safe_post(build_url("/job/send"), job_payload)
         if res_job and res_job.status_code in [200, 201]:
-            logs.append(f"⚙️ Intervention `{job['type_name']}` créée.")
+            logs.append(f"⚙️ Intervention `{job['type_name']}` créée (Type ID: `{job_type_id or 'Défaut'}`).")
             created_jobs_count += 1
         else:
             logs.append(f"❌ Erreur création intervention `{job['type_name']}`")
