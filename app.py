@@ -48,11 +48,6 @@ st.markdown("""
             border-radius: 12px;
         }
         h1 { color: #1E3A8A; }
-        .streamlit-expanderHeader {
-            background-color: #FFFFFF;
-            border-radius: 8px;
-            font-weight: bold;
-        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -104,17 +99,10 @@ HEADERS = {
 }
 
 def normalize_string(text):
-    """
-    Nettoyage ultra-strict des espaces (y compris espaces insecables \xa0 / \u202f),
-    des majuscules et de la forme unicode pour garantir l'égalité.
-    """
     if not text:
         return ""
-    # 1. Normalisation unicode (accents)
     text = unicodedata.normalize('NFKC', str(text))
-    # 2. Remplacement de TOUS les espaces invisibles/insecables par des espaces standard (ASCII 32)
     text = re.sub(r"[\s\xa0\u200b\u202f]+", " ", text)
-    # 3. Suppression des espaces de début/fin et passage en majuscules
     return text.strip().upper()
 
 def build_url(endpoint):
@@ -402,6 +390,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
     for job in interventions_to_create:
         job_type_id = resolve_job_type_id(job["type_name"], job_types_map)
 
+        # Structure ajustée pour l'API Synchroteam (envoi sous forme d'objet ET de typeId direct)
         job_payload = {
             "customerId": customer_id,
             "siteId": site_id,
@@ -409,16 +398,19 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         }
         
         if job_type_id:
-            job_payload["type"] = {"id": job_type_id}
-            logs.append(f"⚙️ `[{job['type_name']}]` -> ID OK : `{job_type_id}`")
+            # Synchroteam accepte soit type: {"id": ID}, soit type: ID selon la version d'API
+            job_payload["type"] = {"id": int(job_type_id)}
+            job_payload["typeId"] = int(job_type_id)
+            logs.append(f"⚙️ `[{job['type_name']}]` -> ID appliqué : `{job_type_id}`")
         else:
-            logs.append(f"⚠️ `[{job['type_name']}]` -> ID NON TROUVÉ")
+            logs.append(f"⚠️ `[{job['type_name']}]` -> ID INTROUVABLE DANS L'API")
 
         res_job = safe_post(build_url("/job/send"), job_payload)
         if res_job and res_job.status_code in [200, 201]:
             created_jobs_count += 1
         else:
-            logs.append(f"❌ Erreur API Synchroteam pour `{job['type_name']}`")
+            err_body = res_job.text if res_job else "Pas de réponse"
+            logs.append(f"❌ Erreur API Synchroteam pour `{job['type_name']}` : {err_body}")
 
     history_entry = {
         "timestamp": datetime.now().isoformat(),
@@ -458,6 +450,10 @@ with col1:
 with col2:
     history_data = load_history()
     st.metric(label="Dossiers traités (48h)", value=len(history_data))
+
+# Débugger temporaire visible pour contrôler la correspondance des types
+with st.expander("🔍 Vérification des Types d'interventions chargés depuis Synchroteam"):
+    st.json(job_types_map)
 
 st.markdown("---")
 
