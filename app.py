@@ -167,7 +167,7 @@ def fetch_job_types_map():
     return job_types_map
 
 def find_existing_site_by_myid(myid):
-    """Recherche un site existant dans Synchroteam via son myId."""
+    """Recherche si un site existe déjà via son numéro de dossier personnalisé (myId)."""
     search_url = build_url(f"/site/list?myId={requests.utils.quote(myid)}")
     try:
         res = requests.get(search_url, headers=HEADERS, timeout=10)
@@ -211,7 +211,7 @@ def get_or_create_customer(pdf_client_name):
     return None
 
 # ==========================================
-# 4. PARSER DE PDF
+# 4. PARSER DE PDF (CORRIGÉ)
 # ==========================================
 def parse_pdf_file(uploaded_file):
     site_info = {
@@ -238,18 +238,11 @@ def parse_pdf_file(uploaded_file):
         if client_m:
             site_info["client"] = client_m.group(1).strip()
 
-        dossier_m = re.search(r"DOSSIER\s*N°\s*:\s*([\d-]+)\s*\(([^)]+)\)", full_text, re.IGNORECASE)
+        # Extraire le DOSSIER N° : 2607-107 (PDRE P2026071702Q - 26-015)
+        dossier_m = re.search(r"DOSSIER\s*N°\s*:\s*([^\n(]+)\s*\(([^)]+)\)", full_text, re.IGNORECASE)
         if dossier_m:
-            dossier_num = dossier_m.group(1).strip()
-            details = dossier_m.group(2).strip()
-            
-            if " - " in details:
-                pdre_part, site_label = details.split(" - ", 1)
-                site_info["myid"] = pdre_part.strip()
-                site_info["name"] = f"{dossier_num} - {site_label.strip()}"
-            else:
-                site_info["name"] = f"{dossier_num} - {details}"
-                site_info["myid"] = dossier_num
+            site_info["name"] = dossier_m.group(1).strip()
+            site_info["myid"] = dossier_m.group(2).strip()
 
         adresse_m = re.search(r"ADRESSE D'INTERVENTION\s*:\s*(.+)", full_text, re.IGNORECASE)
         if adresse_m:
@@ -302,25 +295,24 @@ def parse_pdf_file(uploaded_file):
 # ==========================================
 # 5. TRAITEMENT & SYNCHROTEAM
 # ==========================================
-def process_single_pdf(uploaded_file, job_types_map, user_email, attach_only=False):
+def process_single_pdf(uploaded_file, job_types_map, user_email):
     logs = []
     created_jobs_count = 0
     site_info, g_objs_list, suivi_zones, j_procs, uv_objs, process_names = parse_pdf_file(uploaded_file)
     
     logs.append(f"📄 **Fichier :** `{uploaded_file.name}`")
-    logs.append(f"📍 **Site / Dossier :** `{site_info['name']}` (Réf.: `{site_info['myid']}`)")
+    logs.append(f"📍 **Dossier :** `{site_info['name']}` (Réf.: `{site_info['myid']}`)")
 
-    site_id = None
-    customer_id = None
+    # 1. Recherche du site existant par son myId exact
+    site_id, customer_id = find_existing_site_by_myid(site_info["myid"])
+    site_existed = False
 
-    if attach_only:
-        # Recherche du site existant
-        site_id, customer_id = find_existing_site_by_myid(site_info["myid"])
-        if not site_id:
-            return False, f"Site non trouvé pour le numéro de dossier `{site_info['myid']}`. Décochez l'option pour créer le site.", logs, 0
-        logs.append(f"🔗 **Mode Rattachement :** Site existant trouvé (ID: `{site_id}`)")
+    if site_id and customer_id:
+        site_existed = True
+        logs.append(f"🔗 **Site existant trouvé** (ID: `{site_id}`). Rattachement direct...")
     else:
-        # Création / Vérification du Client et du Site
+        # 2. Création si non trouvé
+        logs.append("🔍 Site non trouvé. Création du dossier...")
         customer_id = get_or_create_customer(site_info["client"])
         if not customer_id:
             return False, "Échec récupération/création du Client.", logs, 0
@@ -341,9 +333,9 @@ def process_single_pdf(uploaded_file, job_types_map, user_email, attach_only=Fal
             return False, f"Échec création du site : {err_msg}", logs, 0
 
         site_id = res_site.json().get("id")
-        logs.append(f"✅ Site validé dans Synchroteam (ID: `{site_id}`)")
+        logs.append(f"✅ Nouveau site créé dans Synchroteam (ID: `{site_id}`)")
 
-    # Création des interventions
+    # 3. Création des interventions
     interventions_to_create = []
 
     for g_item in g_objs_list:
@@ -416,11 +408,12 @@ def process_single_pdf(uploaded_file, job_types_map, user_email, attach_only=Fal
         "client": site_info["client"],
         "site": site_info["name"],
         "jobs_count": created_jobs_count,
-        "attached_only": attach_only
+        "attached_to_existing": site_existed
     }
     save_history_entry(history_entry)
 
-    return True, f"Interventions du dossier **{site_info['name']}** générées avec succès !", logs, created_jobs_count
+    status_txt = "rattachées au site existant" if site_existed else "créées avec le nouveau site"
+    return True, f"Dossier **{site_info['name']}** : {created_jobs_count} intervention(s) {status_txt} !", logs, created_jobs_count
 
 # ==========================================
 # 6. INTERFACE PRINCIPALE
@@ -451,12 +444,6 @@ st.markdown("---")
 tab_import, tab_history = st.tabs(["🚀 Nouvel Import", "📜 Historique (48h)"])
 
 with tab_import:
-    attach_only = st.checkbox(
-        "🔗 Rattacher uniquement les interventions à un dossier existant (Ne pas créer de site)",
-        value=False,
-        help="Cochez cette case si le site existe déjà dans Synchroteam et que vous souhaitez uniquement lui ajouter les interventions."
-    )
-
     uploaded_files = st.file_uploader(
         "Glissez-déposez vos stratégies PDF ci-dessous",
         type=["pdf"],
@@ -464,13 +451,11 @@ with tab_import:
     )
 
     if uploaded_files:
-        btn_label = f"⚡ Créer les interventions sur le dossier existant ({len(uploaded_files)} fichier(s))" if attach_only else f"⚡ Lancer l'import complet ({len(uploaded_files)} fichier(s))"
-
-        if st.button(btn_label, type="primary", use_container_width=True):
+        if st.button(f"⚡ Lancer le traitement ({len(uploaded_files)} fichier(s))", type="primary", use_container_width=True):
             for file in uploaded_files:
                 with st.expander(f"⚙️ Traitement de : {file.name}", expanded=True):
                     success, message, logs, count = process_single_pdf(
-                        file, job_types_map, st.session_state.user_email, attach_only=attach_only
+                        file, job_types_map, st.session_state.user_email
                     )
                     for log in logs:
                         st.markdown(log)
@@ -490,8 +475,8 @@ with tab_history:
             with st.container():
                 c1, c2, c3 = st.columns([2, 3, 2])
                 user_label = entry.get('user_email', 'Utilisateur inconnu')
-                tag_attached = " 🔗 (Rattachement)" if entry.get("attached_only") else ""
+                tag_site = " 🔗 (Site existant)" if entry.get("attached_to_existing") else " ✨ (Nouveau site)"
                 c1.write(f"📅 **{entry['date_str']}**\n\n👤 `{user_label}`")
-                c2.write(f"🏢 **{entry['client']}**\n📍 {entry['site']}{tag_attached}")
+                c2.write(f"🏢 **{entry['client']}**\n📍 {entry['site']}{tag_site}")
                 c3.caption(f"⚙️ {entry['jobs_count']} int. créée(s)")
                 st.divider()
