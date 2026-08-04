@@ -258,7 +258,7 @@ def get_or_create_customer(pdf_client_name):
     return None
 
 # ==========================================
-# 4. PARSER PDF (PAR PHASE STRICTE)
+# 4. PARSER PDF (GROUPE PAR PHASE & CAPTURE PROCESSUS)
 # ==========================================
 def parse_pdf_file(uploaded_file):
     site_info = {"client": "", "name": "", "myid": "", "address": "", "zip": "", "city": ""}
@@ -306,6 +306,7 @@ def parse_pdf_file(uploaded_file):
                 cell_zse = row[0].strip() if len(row) > 0 and row[0] else ""
                 full_row_text = " ".join([c for c in row if c])
 
+                # Détection de la Phase
                 phase_m = re.search(r"(Phase\s*\d+|ZSE\s*\d+)", cell_zse or full_row_text, re.IGNORECASE)
                 if phase_m:
                     current_phase = phase_m.group(1).title()
@@ -313,6 +314,7 @@ def parse_pdf_file(uploaded_file):
                 if current_phase not in suivi_zones:
                     suivi_zones[current_phase] = {"measures": {}, "j_proc": 0}
 
+                # Extraction des paires Code (Quantité)
                 codes_found = re.findall(r"\b([A-Z]+(?:-[A-Z0-9]+)?)\s*\(\s*(\d+)\s*\)", full_row_text)
                 for code, qty_str in codes_found:
                     qty = int(qty_str)
@@ -327,11 +329,14 @@ def parse_pdf_file(uploaded_file):
                         measures = suivi_zones[current_phase]["measures"]
                         measures[code] = measures.get(code, 0) + qty
 
+                # Capture exacte des intitulés complets de Processus
                 if "PROCESSUS" in full_row_text.upper():
-                    proc_m = re.search(r"(PROCESSUS\s*N°\s*\d+\s*:[^\n]+)", full_row_text, re.IGNORECASE)
+                    proc_m = re.search(r"(PROCESSUS\s*N°?\s*\d+\s*:[^GJKLMNQRUVXY]+)", full_row_text, re.IGNORECASE)
                     if proc_m:
-                        proc_clean = proc_m.group(1).strip()
+                        raw_proc = proc_m.group(1).strip()
+                        proc_clean = re.sub(r"\s+", " ", raw_proc)
                         proc_clean = re.sub(r"\s+[A-Z-]+(?:\(\d+\))?.*$", "", proc_clean).strip()
+                        
                         if proc_clean and proc_clean not in process_names:
                             process_names.append(proc_clean)
 
@@ -385,9 +390,8 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         interventions_to_create.append({"type_name": "Pose G", "description": desc_g})
         interventions_to_create.append({"type_name": "Dépose G", "description": desc_g})
 
-    # 2. Suivis 4h par Phase
+    # 2. Suivis 4h par Phase (Intégration N, Q, R, L + J-PROC & Intitulé Processus)
     suivi_type_label = "Suivi 4h - Enviro + opé + MES + Mat"
-    proc_list_str = "\n".join(process_names) if process_names else ""
 
     for phase_label, phase_data in suivi_zones.items():
         measures_dict = phase_data["measures"]
@@ -396,10 +400,10 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         measures_str = " / ".join([f"{k}: {v}" for k, v in measures_dict.items()])
         desc_lines = [f"{phase_label} : {measures_str}"]
         
-        if j_proc_qty > 0:
-            desc_lines.append(f"+ J-PROC ({j_proc_qty})")
-        if proc_list_str:
-            desc_lines.append(proc_list_str)
+        if j_proc_qty > 0 or process_names:
+            desc_lines.append(f"J-PROC ({j_proc_qty if j_proc_qty > 0 else 1})")
+            for proc in process_names:
+                desc_lines.append(proc)
 
         interventions_to_create.append({
             "type_name": suivi_type_label,
