@@ -101,7 +101,6 @@ HEADERS = {
 def normalize_string(text):
     if not text:
         return ""
-    # Normalisation unicode NFKC + remplacement de TOUS les types d'espaces invisibles/insecables
     text = unicodedata.normalize('NFKC', str(text))
     text = re.sub(r"[\s\xa0\u200b\u202f]+", " ", text)
     return text.strip().upper()
@@ -147,26 +146,37 @@ def save_history_entry(entry):
 
 def fetch_job_types_map():
     job_types_map = {}
-    url = build_url("/job/type/list")
-    try:
-        res = requests.get(url, headers=HEADERS, timeout=10)
-        if res.status_code == 200:
-            raw_response = res.json()
-            # Support du retour sous forme de dict {"data": [...]} ou de liste directe
-            records = raw_response.get("data", []) if isinstance(raw_response, dict) else raw_response
-            
-            for item in records:
-                if isinstance(item, dict) and "name" in item and "id" in item:
-                    clean_name = normalize_string(item["name"])
-                    job_types_map[clean_name] = item["id"]
-            
-            if not job_types_map:
-                st.error("⚠️ L'API Synchroteam a répondu 200 mais aucun type d'intervention n'a été trouvé.")
-        else:
-            st.error(f"⚠️ Échec de la récupération des types (Code {res.status_code}) : {res.text}")
-    except Exception as e:
-        st.error(f"⚠️ Erreur de connexion lors de la récupération des types : {e}")
+    endpoints_to_test = [
+        "/jobType/list",
+        "/job/types",
+        "/job/type/list"
+    ]
+    
+    raw_response = None
+    successful_endpoint = None
+
+    for ep in endpoints_to_test:
+        url = build_url(ep)
+        try:
+            res = requests.get(url, headers=HEADERS, timeout=10)
+            if res.status_code == 200:
+                raw_response = res.json()
+                successful_endpoint = ep
+                break
+        except Exception:
+            continue
+
+    if raw_response:
+        records = raw_response.get("data", []) if isinstance(raw_response, dict) else raw_response
+        for item in records:
+            if isinstance(item, dict) and "name" in item and "id" in item:
+                clean_name = normalize_string(item["name"])
+                job_types_map[clean_name] = item["id"]
         
+        st.toast(f"Types chargés avec succès", icon="✅")
+    else:
+        st.error("⚠️ Impossible de récupérer les types d'interventions depuis Synchroteam.")
+
     return job_types_map
 
 def find_existing_site_by_myid(myid):
