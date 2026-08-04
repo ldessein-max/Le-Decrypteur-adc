@@ -224,13 +224,16 @@ def get_or_create_customer(pdf_client_name):
 
 def resolve_job_type_id(target_label, job_types_map):
     target_clean = normalize_string(target_label)
+    
+    # 1. Recherche exacte
     if target_clean in job_types_map:
         return job_types_map[target_clean]
     
-    # Sécurité supplémentaire pour les variantes d'espaces
+    # 2. Recherche tolérante (ex: "POSE G" vs "POSE DE G")
     for name_clean, type_id in job_types_map.items():
-        if name_clean == target_clean:
+        if target_clean in name_clean or name_clean in target_clean:
             return type_id
+
     return None
 
 # ==========================================
@@ -395,7 +398,6 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         for cat, list_measures in by_category.items():
             desc_cat = " / ".join(list_measures)
             
-            # Correction stricte des libellés de types pour Synchroteam
             pose_label = f"Pose {cat}"
             depose_label = f"Dépose {cat}"
             
@@ -412,11 +414,12 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         }
         
         if job_type_id:
+            job_payload["jobTypeId"] = int(job_type_id)
             job_payload["type"] = {"id": int(job_type_id)}
             job_payload["typeId"] = int(job_type_id)
             logs.append(f"⚙️ `[{job['type_name']}]` -> ID appliqué : `{job_type_id}`")
         else:
-            logs.append(f"⚠️ `[{job['type_name']}]` -> ID INTROUVABLE DANS L'API (Vérifiez le nom exact dans Synchroteam)")
+            logs.append(f"⚠️ `[{job['type_name']}]` -> ID INTROUVABLE DANS L'API")
 
         res_job = safe_post(build_url("/job/send"), job_payload)
         if res_job and res_job.status_code in [200, 201]:
