@@ -82,7 +82,7 @@ if not check_auth():
     st.stop()
 
 # ==========================================
-# 3. SYNCHROTEAM & HISTORIQUE
+# 3. CONFIGURATION SYNCHROTEAM & HISTORIQUE
 # ==========================================
 SYNCHROTEAM_DOMAIN = st.secrets["SYNCHROTEAM_DOMAIN"]
 SYNCHROTEAM_API_KEY = st.secrets["SYNCHROTEAM_API_KEY"]
@@ -141,26 +141,38 @@ def save_history_entry(entry):
 
 def fetch_job_types_map():
     job_types_map = {}
-    endpoints = ["/jobType/list", "/job/types", "/job/type/list"]
+    page = 1
+    page_size = 50  # Récupère tous les types même au-delà de la page 1 (ex: 46 types)
     
-    for ep in endpoints:
+    while True:
+        url = build_url(f"/jobType/list?page={page}&pageSize={page_size}")
         try:
-            res = requests.get(build_url(ep), headers=HEADERS, timeout=10)
+            res = requests.get(url, headers=HEADERS, timeout=10)
             if res.status_code == 200:
                 data = res.json()
                 records = data.get("data", []) if isinstance(data, dict) else data
+                
+                if not records:
+                    break
+                
                 for item in records:
                     if isinstance(item, dict) and "name" in item and "id" in item:
-                        # On stocke en majuscules sans espaces superflus pour le mapping
                         clean_key = normalize_string(item["name"])
                         job_types_map[clean_key] = item["id"]
-                st.toast("Types d'interventions chargés", icon="✅")
+                
+                if len(records) < page_size:
+                    break
+                
+                page += 1
+            else:
                 break
         except Exception:
-            continue
+            break
 
-    if not job_types_map:
-        st.error("⚠️ Erreur lors de la récupération des types Synchroteam.")
+    if job_types_map:
+        st.toast(f"{len(job_types_map)} types d'interventions chargés", icon="✅")
+    else:
+        st.error("⚠️ Impossible de récupérer la liste des types Synchroteam.")
 
     return job_types_map
 
@@ -218,7 +230,8 @@ def parse_pdf_file(uploaded_file):
         full_text = "".join([(page.extract_text() or "") + "\n" for page in pdf.pages])
 
         client_m = re.search(r"CLIENT\s*:\s*(.+)", full_text, re.IGNORECASE)
-        if client_m: site_info["client"] = client_m.group(1).strip()
+        if client_m: 
+            site_info["client"] = client_m.group(1).strip()
 
         dossier_m = re.search(r"DOSSIER\s*N°\s*:\s*([^\n(]+)\s*\(([^)]+)\)", full_text, re.IGNORECASE)
         if dossier_m:
@@ -234,8 +247,10 @@ def parse_pdf_file(uploaded_file):
                 site_info["zip"] = cp_ville_m.group(1)
                 site_info["city"] = cp_ville_m.group(2).strip()
 
-        if not site_info["client"]: site_info["client"] = "CLIENT INCONNU"
-        if not site_info["name"]: site_info["name"] = uploaded_file.name.split(".")[0]
+        if not site_info["client"]: 
+            site_info["client"] = "CLIENT INCONNU"
+        if not site_info["name"]: 
+            site_info["name"] = uploaded_file.name.split(".")[0]
 
         target_page = pdf.pages[-1]
         lines = (target_page.extract_text() or "").split("\n")
@@ -243,9 +258,11 @@ def parse_pdf_file(uploaded_file):
 
         for line in lines:
             zone_match = re.search(r"\b(Zone\s*\d+)\b", line, re.IGNORECASE)
-            if zone_match: current_zone = zone_match.group(1).title()
+            if zone_match: 
+                current_zone = zone_match.group(1).title()
 
-            if current_zone not in suivi_zones: suivi_zones[current_zone] = {}
+            if current_zone not in suivi_zones: 
+                suivi_zones[current_zone] = {}
 
             codes_found = re.findall(r"\b([A-Z]+(?:-[A-Z0-9]+)?)\s*\(\s*(\d+)\s*\)", line)
             for code, qty_str in codes_found:
@@ -268,7 +285,7 @@ def parse_pdf_file(uploaded_file):
     return site_info, g_objs_list, suivi_zones, j_procs, uv_objs, process_names
 
 # ==========================================
-# 5. TRAITEMENT ET CRÉATION
+# 5. TRAITEMENT ET SYNCHROTEAM
 # ==========================================
 def process_single_pdf(uploaded_file, job_types_map, user_email):
     logs = []
@@ -283,12 +300,12 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
 
     if site_id and customer_id:
         site_existed = True
-        logs.append(f"🔗 **Site existant trouvé** (ID: `{site_id}`).")
+        logs.append(f"🔗 **Site existant trouvé** (ID: `{site_id}`). Rattachement...")
     else:
         logs.append("🔍 Création du site...")
         customer_id = get_or_create_customer(site_info["client"])
         if not customer_id:
-            return False, "Échec client.", logs, 0
+            return False, "Échec lors de la création/récupération du client.", logs, 0
 
         site_payload = {
             "name": site_info["name"],
@@ -301,20 +318,20 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         }
         res_site = safe_post(build_url("/site/send"), site_payload)
         if not res_site or res_site.status_code not in [200, 201]:
-            return False, "Échec création du site.", logs, 0
+            return False, "Échec lors de la création du site.", logs, 0
 
         site_id = res_site.json().get("id")
         logs.append(f"✅ Site créé (ID: `{site_id}`)")
 
     interventions_to_create = []
 
-    # 1. G : Une Pose + Une Dépose
+    # 1. G : Pose G + Dépose G
     for g_item in g_objs_list:
         desc_g = " / ".join([f"{k}: {v}" for k, v in g_item.items()])
         interventions_to_create.append({"type_name": "Pose G", "description": desc_g})
         interventions_to_create.append({"type_name": "Dépose G", "description": desc_g})
 
-    # 2. SUIVI : Libellé strict
+    # 2. Suivi : Libellé exact
     suivi_type_label = "Suivi 4h - Enviro + opé + MES + Mat"
     total_j_proc = sum(j_procs) if j_procs else 0
     j_proc_line = f"+ J-PROC ({total_j_proc})" if total_j_proc > 0 else ""
@@ -324,15 +341,17 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         if objs:
             measures_str = " / ".join([f"{k}: {v}" for k, v in objs.items()])
             desc_lines = [f"{zone_name} : {measures_str}"]
-            if j_proc_line: desc_lines.append(j_proc_line)
-            if proc_list_str: desc_lines.append(proc_list_str)
+            if j_proc_line: 
+                desc_lines.append(j_proc_line)
+            if proc_list_str: 
+                desc_lines.append(proc_list_str)
 
             interventions_to_create.append({
                 "type_name": suivi_type_label,
                 "description": "\n".join(desc_lines)
             })
 
-    # 3. U, V, X, Y : Une Pose + Une Dépose par catégorie
+    # 3. U, V, X, Y : Pose + Dépose par catégorie
     if uv_objs:
         by_category = {}
         for code, qty in uv_objs.items():
@@ -344,7 +363,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
             interventions_to_create.append({"type_name": f"Pose {cat}", "description": desc_cat})
             interventions_to_create.append({"type_name": f"Dépose {cat}", "description": desc_cat})
 
-    # Création dans Synchroteam
+    # Envoi vers Synchroteam
     for job in interventions_to_create:
         target_clean = normalize_string(job["type_name"])
         job_type_id = job_types_map.get(target_clean)
@@ -359,13 +378,14 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
             job_payload["type"] = {"id": int(job_type_id)}
             logs.append(f"⚙️ `[{job['type_name']}]` -> ID : `{job_type_id}`")
         else:
-            logs.append(f"⚠️ `[{job['type_name']}]` NON TROUVÉ DANS L'API (Défaut appliqué par Synchroteam)")
+            logs.append(f"⚠️ `[{job['type_name']}]` non trouvé dans l'API")
 
         res_job = safe_post(build_url("/job/send"), job_payload)
         if res_job and res_job.status_code in [200, 201]:
             created_jobs_count += 1
         else:
-            logs.append(f"❌ Erreur `{job['type_name']}` : {res_job.text if res_job else 'Réseau'}")
+            err_text = res_job.text if res_job else "Pas de réponse"
+            logs.append(f"❌ Erreur API pour `{job['type_name']}` : {err_text}")
 
     save_history_entry({
         "timestamp": datetime.now().isoformat(),
@@ -381,7 +401,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
     return True, f"Dossier **{site_info['name']}** traité avec succès !", logs, created_jobs_count
 
 # ==========================================
-# 6. UI STREAMLIT
+# 6. INTERFACE STREAMLIT
 # ==========================================
 header_col1, header_col2 = st.columns([4, 1])
 with header_col1:
@@ -396,8 +416,10 @@ with header_col2:
 job_types_map = fetch_job_types_map()
 
 col1, col2 = st.columns(2)
-with col1: st.metric("Statut API", "Connecté", f"{len(job_types_map)} types")
-with col2: st.metric("Dossiers (48h)", len(load_history()))
+with col1: 
+    st.metric("Statut API", "Connecté", delta=f"{len(job_types_map)} types")
+with col2: 
+    st.metric("Dossiers (48h)", len(load_history()))
 
 with st.expander("🔍 Vérification des types d'interventions chargés"):
     st.json(job_types_map)
@@ -412,9 +434,12 @@ with tab_import:
         for file in uploaded_files:
             with st.expander(f"Traitement : {file.name}", expanded=True):
                 ok, msg, logs, _ = process_single_pdf(file, job_types_map, st.session_state.user_email)
-                for log in logs: st.markdown(log)
-                if ok: st.success(msg)
-                else: st.error(msg)
+                for log in logs: 
+                    st.markdown(log)
+                if ok: 
+                    st.success(msg)
+                else: 
+                    st.error(msg)
 
 with tab_history:
     for entry in load_history():
