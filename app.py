@@ -101,6 +101,7 @@ HEADERS = {
 def normalize_string(text):
     if not text:
         return ""
+    # Normalisation unicode NFKC + remplacement de TOUS les types d'espaces invisibles/insecables
     text = unicodedata.normalize('NFKC', str(text))
     text = re.sub(r"[\s\xa0\u200b\u202f]+", " ", text)
     return text.strip().upper()
@@ -146,26 +147,26 @@ def save_history_entry(entry):
 
 def fetch_job_types_map():
     job_types_map = {}
-    page = 1
-    while True:
-        url = build_url(f"/job/type/list?page={page}&pageSize=100")
-        try:
-            res = requests.get(url, headers=HEADERS, timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                records = data.get("data", [])
-                for item in records:
+    url = build_url("/job/type/list")
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        if res.status_code == 200:
+            raw_response = res.json()
+            # Support du retour sous forme de dict {"data": [...]} ou de liste directe
+            records = raw_response.get("data", []) if isinstance(raw_response, dict) else raw_response
+            
+            for item in records:
+                if isinstance(item, dict) and "name" in item and "id" in item:
                     clean_name = normalize_string(item["name"])
                     job_types_map[clean_name] = item["id"]
-
-                if page * 100 >= data.get("recordsTotal", 0) or not records:
-                    break
-                page += 1
-            else:
-                break
-        except Exception as e:
-            st.error(f"Erreur chargement types interventions : {e}")
-            break
+            
+            if not job_types_map:
+                st.error("⚠️ L'API Synchroteam a répondu 200 mais aucun type d'intervention n'a été trouvé.")
+        else:
+            st.error(f"⚠️ Échec de la récupération des types (Code {res.status_code}) : {res.text}")
+    except Exception as e:
+        st.error(f"⚠️ Erreur de connexion lors de la récupération des types : {e}")
+        
     return job_types_map
 
 def find_existing_site_by_myid(myid):
@@ -390,7 +391,6 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
     for job in interventions_to_create:
         job_type_id = resolve_job_type_id(job["type_name"], job_types_map)
 
-        # Structure ajustée pour l'API Synchroteam (envoi sous forme d'objet ET de typeId direct)
         job_payload = {
             "customerId": customer_id,
             "siteId": site_id,
@@ -398,7 +398,6 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         }
         
         if job_type_id:
-            # Synchroteam accepte soit type: {"id": ID}, soit type: ID selon la version d'API
             job_payload["type"] = {"id": int(job_type_id)}
             job_payload["typeId"] = int(job_type_id)
             logs.append(f"⚙️ `[{job['type_name']}]` -> ID appliqué : `{job_type_id}`")
@@ -451,8 +450,7 @@ with col2:
     history_data = load_history()
     st.metric(label="Dossiers traités (48h)", value=len(history_data))
 
-# Débugger temporaire visible pour contrôler la correspondance des types
-with st.expander("🔍 Vérification des Types d'interventions chargés depuis Synchroteam"):
+with st.expander("🔍 Dictionnaire des types chargés (Vérification de sécurité)"):
     st.json(job_types_map)
 
 st.markdown("---")
