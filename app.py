@@ -17,30 +17,19 @@ st.set_page_config(
     layout="centered"
 )
 
-# --- CONFIGURATION DU DOMAINE AUTORISÉ ---
 ALLOWED_DOMAIN = "adc-labo.fr"
 
-# Injection CSS pour le fond bleuté et le design moderne
 st.markdown("""
     <style>
-        /* Fond global de l'application */
-        .stApp {
-            background-color: #F0F4F8;
-        }
-
-        /* Cartes et conteneurs */
+        .stApp { background-color: #F0F4F8; }
         div[data-testid="metric-container"] {
             background-color: #FFFFFF;
             padding: 15px 20px;
             border-radius: 12px;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
             border: 1px solid #E2E8F0;
         }
-
-        /* Stylisation des onglets */
-        .stTabs [data-baseweb="tab-list"] {
-            gap: 10px;
-        }
+        .stTabs [data-baseweb="tab-list"] { gap: 10px; }
         .stTabs [data-baseweb="tab"] {
             background-color: #E2E8F0;
             border-radius: 8px 8px 0 0;
@@ -52,20 +41,12 @@ st.markdown("""
             background-color: #1E40AF !important;
             color: #FFFFFF !important;
         }
-
-        /* Zone de drag & drop PDF */
         section[data-testid="stFileUploadDropzone"] {
             background-color: #FFFFFF;
             border: 2px dashed #93C5FD;
             border-radius: 12px;
         }
-
-        /* Titres */
-        h1 {
-            color: #1E3A8A;
-        }
-        
-        /* Expander de traitement */
+        h1 { color: #1E3A8A; }
         .streamlit-expanderHeader {
             background-color: #FFFFFF;
             border-radius: 8px;
@@ -75,7 +56,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. GESTION AUTHENTIFICATION EMAIL PRO
+# 2. GESTION AUTHENTIFICATION
 # ==========================================
 def check_auth():
     if "authenticated" not in st.session_state:
@@ -165,7 +146,7 @@ def fetch_job_types_map():
     job_types_map = {}
     page = 1
     while True:
-        url = build_url(f"/jobType/list?page={page}&pageSize=50")
+        url = build_url(f"/job/type/list?page={page}&pageSize=50")
         try:
             res = requests.get(url, headers=HEADERS, timeout=10)
             if res.status_code == 200:
@@ -185,17 +166,28 @@ def fetch_job_types_map():
             break
     return job_types_map
 
+def find_existing_site_by_myid(myid):
+    """Recherche un site existant dans Synchroteam via son myId."""
+    search_url = build_url(f"/site/list?myId={requests.utils.quote(myid)}")
+    try:
+        res = requests.get(search_url, headers=HEADERS, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            sites = data.get("data", []) if isinstance(data, dict) else data
+            for site in sites:
+                if site.get("myId", "").strip().upper() == myid.strip().upper():
+                    return site.get("id"), site.get("customerId")
+    except Exception:
+        pass
+    return None, None
+
 def get_or_create_customer(pdf_client_name):
     search_url = build_url(f"/customer/list?name={requests.utils.quote(pdf_client_name)}")
     try:
         res_search = requests.get(search_url, headers=HEADERS, timeout=10)
         if res_search.status_code == 200:
             data = res_search.json()
-            clients = []
-            if isinstance(data, list):
-                clients = data
-            elif isinstance(data, dict):
-                clients = data.get("customers", data.get("data", []))
+            clients = data.get("data", []) if isinstance(data, dict) else data
 
             for c in clients:
                 if c.get("name", "").strip().upper() == pdf_client_name.strip().upper():
@@ -216,14 +208,10 @@ def get_or_create_customer(pdf_client_name):
     res_create = safe_post(build_url("/customer/send"), payload)
     if res_create and res_create.status_code in [200, 201]:
         return res_create.json().get("id")
-    else:
-        error_detail = res_create.text if res_create else "Pas de réponse serveur"
-        status_code = res_create.status_code if res_create else "N/A"
-        st.error(f"Détail erreur API Client (Code {status_code}): {error_detail}")
-        return None
+    return None
 
 # ==========================================
-# 4. PARSER DE PDF DYNAMIQUE (CORRIGÉ)
+# 4. PARSER DE PDF
 # ==========================================
 def parse_pdf_file(uploaded_file):
     site_info = {
@@ -235,7 +223,7 @@ def parse_pdf_file(uploaded_file):
         "city": ""
     }
     
-    g_objs_list = []  # Utilisation d'une liste pour ne pas écraser les doublons de G (#ZSE1, #ZSE2...)
+    g_objs_list = []
     uv_objs = {}
     suivi_zones = {}
     j_procs = []
@@ -246,7 +234,6 @@ def parse_pdf_file(uploaded_file):
         for page in pdf.pages:
             full_text += (page.extract_text() or "") + "\n"
 
-        # Cartouche Client/Site
         client_m = re.search(r"CLIENT\s*:\s*(.+)", full_text, re.IGNORECASE)
         if client_m:
             site_info["client"] = client_m.group(1).strip()
@@ -279,13 +266,11 @@ def parse_pdf_file(uploaded_file):
         if not site_info["name"]:
             site_info["name"] = uploaded_file.name.split(".")[0]
 
-        # Lecture par Zone
         target_page = pdf.pages[-1]
         lines = (target_page.extract_text() or "").split("\n")
         current_zone = "Zone 1"
 
         for line in lines:
-            # Mise à jour de la zone active AVANT le parsing des codes de la ligne
             zone_match = re.search(r"\b(Zone\s*\d+)\b", line, re.IGNORECASE)
             if zone_match:
                 current_zone = zone_match.group(1).title()
@@ -304,7 +289,6 @@ def parse_pdf_file(uploaded_file):
                 elif code == "J-PROC":
                     j_procs.append(qty)
                 else:
-                    # Accumulation correcte au lieu d'écraser
                     suivi_zones[current_zone][code] = suivi_zones[current_zone].get(code, 0) + qty
 
             if "PROCEDURE" in line.upper() or "PROC" in line.upper():
@@ -318,44 +302,50 @@ def parse_pdf_file(uploaded_file):
 # ==========================================
 # 5. TRAITEMENT & SYNCHROTEAM
 # ==========================================
-def process_single_pdf(uploaded_file, job_types_map, user_email):
+def process_single_pdf(uploaded_file, job_types_map, user_email, attach_only=False):
     logs = []
     created_jobs_count = 0
     site_info, g_objs_list, suivi_zones, j_procs, uv_objs, process_names = parse_pdf_file(uploaded_file)
     
     logs.append(f"📄 **Fichier :** `{uploaded_file.name}`")
-    logs.append(f"👤 **Client :** `{site_info['client']}`")
-    logs.append(f"📍 **Site :** `{site_info['name']}` (Réf.: `{site_info['myid']}`)")
-    logs.append(f"🏠 **Adresse :** `{site_info['address']}`")
-    
-    # Client
-    customer_id = get_or_create_customer(site_info["client"])
-    if not customer_id:
-        return False, "Échec récupération/création du Client.", logs, 0
+    logs.append(f"📍 **Site / Dossier :** `{site_info['name']}` (Réf.: `{site_info['myid']}`)")
 
-    # Site
-    site_payload = {
-        "name": site_info["name"],
-        "myId": site_info["myid"],
-        "address": site_info["address"] if site_info["address"] else "À renseigner",
-        "city": site_info["city"] if site_info["city"] else "Paris",
-        "zipCode": site_info["zip"] if site_info["zip"] else "75000",
-        "country": "France",
-        "customerId": customer_id,
-    }
+    site_id = None
+    customer_id = None
 
-    res_site = safe_post(build_url("/site/send"), site_payload)
-    if not res_site or res_site.status_code not in [200, 201]:
-        err_msg = res_site.text if res_site else "Erreur réseau"
-        return False, f"Échec création du site : {err_msg}", logs, 0
+    if attach_only:
+        # Recherche du site existant
+        site_id, customer_id = find_existing_site_by_myid(site_info["myid"])
+        if not site_id:
+            return False, f"Site non trouvé pour le numéro de dossier `{site_info['myid']}`. Décochez l'option pour créer le site.", logs, 0
+        logs.append(f"🔗 **Mode Rattachement :** Site existant trouvé (ID: `{site_id}`)")
+    else:
+        # Création / Vérification du Client et du Site
+        customer_id = get_or_create_customer(site_info["client"])
+        if not customer_id:
+            return False, "Échec récupération/création du Client.", logs, 0
 
-    site_id = res_site.json().get("id")
-    logs.append(f"✅ Site OK dans Synchroteam (ID: `{site_id}`)")
+        site_payload = {
+            "name": site_info["name"],
+            "myId": site_info["myid"],
+            "address": site_info["address"] if site_info["address"] else "À renseigner",
+            "city": site_info["city"] if site_info["city"] else "Paris",
+            "zipCode": site_info["zip"] if site_info["zip"] else "75000",
+            "country": "France",
+            "customerId": customer_id,
+        }
 
-    # Interventions
+        res_site = safe_post(build_url("/site/send"), site_payload)
+        if not res_site or res_site.status_code not in [200, 201]:
+            err_msg = res_site.text if res_site else "Erreur réseau"
+            return False, f"Échec création du site : {err_msg}", logs, 0
+
+        site_id = res_site.json().get("id")
+        logs.append(f"✅ Site validé dans Synchroteam (ID: `{site_id}`)")
+
+    # Création des interventions
     interventions_to_create = []
 
-    # Traitement distinct de chaque ligne G trouvee
     for g_item in g_objs_list:
         desc_g = " / ".join([f"{k}: {v}" for k, v in g_item.items()])
         interventions_to_create.append({"type_name": "POSE G", "description": desc_g})
@@ -417,7 +407,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         else:
             logs.append(f"❌ Erreur création intervention `{job['type_name']}`")
 
-    # Enregistrement avec l'e-mail de l'utilisateur
+    # Enregistrement historique
     history_entry = {
         "timestamp": datetime.now().isoformat(),
         "date_str": datetime.now().strftime("%d/%m/%Y %H:%M"),
@@ -425,16 +415,16 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         "filename": uploaded_file.name,
         "client": site_info["client"],
         "site": site_info["name"],
-        "jobs_count": created_jobs_count
+        "jobs_count": created_jobs_count,
+        "attached_only": attach_only
     }
     save_history_entry(history_entry)
 
-    return True, f"Dossier **{site_info['name']}** traité avec succès !", logs, created_jobs_count
+    return True, f"Interventions du dossier **{site_info['name']}** générées avec succès !", logs, created_jobs_count
 
 # ==========================================
 # 6. INTERFACE PRINCIPALE
 # ==========================================
-# En-tête avec déconnexion
 header_col1, header_col2 = st.columns([4, 1])
 with header_col1:
     st.title("🦛 Le Décrypteur ADC")
@@ -461,6 +451,12 @@ st.markdown("---")
 tab_import, tab_history = st.tabs(["🚀 Nouvel Import", "📜 Historique (48h)"])
 
 with tab_import:
+    attach_only = st.checkbox(
+        "🔗 Rattacher uniquement les interventions à un dossier existant (Ne pas créer de site)",
+        value=False,
+        help="Cochez cette case si le site existe déjà dans Synchroteam et que vous souhaitez uniquement lui ajouter les interventions."
+    )
+
     uploaded_files = st.file_uploader(
         "Glissez-déposez vos stratégies PDF ci-dessous",
         type=["pdf"],
@@ -468,10 +464,14 @@ with tab_import:
     )
 
     if uploaded_files:
-        if st.button(f"⚡ Lancer le traitement des {len(uploaded_files)} fichier(s)", type="primary", use_container_width=True):
+        btn_label = f"⚡ Créer les interventions sur le dossier existant ({len(uploaded_files)} fichier(s))" if attach_only else f"⚡ Lancer l'import complet ({len(uploaded_files)} fichier(s))"
+
+        if st.button(btn_label, type="primary", use_container_width=True):
             for file in uploaded_files:
                 with st.expander(f"⚙️ Traitement de : {file.name}", expanded=True):
-                    success, message, logs, count = process_single_pdf(file, job_types_map, st.session_state.user_email)
+                    success, message, logs, count = process_single_pdf(
+                        file, job_types_map, st.session_state.user_email, attach_only=attach_only
+                    )
                     for log in logs:
                         st.markdown(log)
                     if success:
@@ -490,7 +490,8 @@ with tab_history:
             with st.container():
                 c1, c2, c3 = st.columns([2, 3, 2])
                 user_label = entry.get('user_email', 'Utilisateur inconnu')
+                tag_attached = " 🔗 (Rattachement)" if entry.get("attached_only") else ""
                 c1.write(f"📅 **{entry['date_str']}**\n\n👤 `{user_label}`")
-                c2.write(f"🏢 **{entry['client']}**\n📍 {entry['site']}")
+                c2.write(f"🏢 **{entry['client']}**\n📍 {entry['site']}{tag_attached}")
                 c3.caption(f"⚙️ {entry['jobs_count']} int. créée(s)")
                 st.divider()
