@@ -13,8 +13,8 @@ import streamlit as st
 # 1. CONFIGURATION STREAMLIT & STYLES (ADC)
 # ==========================================
 st.set_page_config(
-    page_title="Le Décrypteur ADC",
-    page_icon="🦛",
+    page_title="LD Décrypteur - ADC",  # Titre personnalisé affiché sur l'onglet
+    page_icon="🦛",                     # Conserve l'hippopotame dans l'onglet
     layout="wide"
 )
 
