@@ -512,6 +512,16 @@ with tab_import:
                     st.error(msg)
 
 with tab_history:
-    for entry in load_history():
-        st.write(f"📅 **{entry['date_str']}** | 🏢 **{entry['client']}** | 📍 {entry['site']}")
-        st.divider()
+    history_data = load_history()
+    if not history_data:
+        st.info("Aucun historique disponible sur les dernières 48 heures.")
+    else:
+        for entry in history_data:
+            user_info = entry.get("user_email", "Utilisateur inconnu")
+            st.write(
+                f"📅 **{entry['date_str']}** | "
+                f"👤 **{user_info}** | "
+                f"🏢 **{entry['client']}** | "
+                f"📍 {entry['site']}"
+            )
+            st.divider()
