@@ -193,7 +193,7 @@ def save_history_entry(entry):
 def fetch_job_types_map():
     job_types_map = {}
     page = 1
-    page_size = 50  # Récupère tous les types même au-delà de la page 1 (ex: 46 types)
+    page_size = 50
     
     while True:
         url = build_url(f"/jobType/list?page={page}&pageSize={page_size}")
@@ -267,7 +267,7 @@ def get_or_create_customer(pdf_client_name):
     return None
 
 # ==========================================
-# 4. PARSER PDF
+# 4. PARSER PDF (RECONSTRUCTION STRICTE PAR PHASE)
 # ==========================================
 def parse_pdf_file(uploaded_file):
     site_info = {"client": "", "name": "", "myid": "", "address": "", "zip": "", "city": ""}
@@ -304,33 +304,67 @@ def parse_pdf_file(uploaded_file):
             site_info["name"] = uploaded_file.name.split(".")[0]
 
         target_page = pdf.pages[-1]
-        lines = (target_page.extract_text() or "").split("\n")
-        current_zone = "Zone 1"
+        
+        # Extraction structurée par tableaux PDF
+        tables = target_page.extract_tables()
+        current_zse = None
 
-        for line in lines:
-            zone_match = re.search(r"\b(Zone\s*\d+)\b", line, re.IGNORECASE)
-            if zone_match: 
-                current_zone = zone_match.group(1).title()
+        for table in tables:
+            for row in table:
+                if not row or not any(row):
+                    continue
+                
+                # Nettoyage des cellules
+                cell_zse = row[0].strip() if len(row) > 0 and row[0] else ""
+                cell_obj = row[2].strip() if len(row) > 2 and row[2] else ""
+                full_row_text = " ".join([c for c in row if c])
 
-            if current_zone not in suivi_zones: 
-                suivi_zones[current_zone] = {}
+                # Mettre à jour la ZSE si une nouvelle phase/zone apparaît dans la première colonne
+                if cell_zse and ("SUIVI DE CHANTIER" in cell_zse.upper() or "PHASE" in cell_zse.upper()):
+                    current_zse = re.sub(r"\s+", " ", cell_zse).strip()
 
-            codes_found = re.findall(r"\b([A-Z]+(?:-[A-Z0-9]+)?)\s*\(\s*(\d+)\s*\)", line)
-            for code, qty_str in codes_found:
-                qty = int(qty_str)
-                if code.startswith("G"):
-                    g_objs_list.append({code: qty})
-                elif any(code.startswith(letter) for letter in ["U", "V", "X", "Y"]):
-                    uv_objs[code] = qty
-                elif code == "J-PROC":
-                    j_procs.append(qty)
-                else:
-                    suivi_zones[current_zone][code] = suivi_zones[current_zone].get(code, 0) + qty
+                # Recherche des mesures (N(1), Q(1), R(1), L(2), etc.)
+                codes_found = re.findall(r"\b([A-Z]+(?:-[A-Z0-9]+)?)\s*\(\s*(\d+)\s*\)", full_row_text)
+                for code, qty_str in codes_found:
+                    qty = int(qty_str)
+                    if code.startswith("G"):
+                        g_objs_list.append({code: qty})
+                    elif any(code.startswith(letter) for letter in ["U", "V", "X", "Y"]):
+                        uv_objs[code] = qty
+                    elif code == "J-PROC":
+                        j_procs.append(qty)
+                    else:
+                        active_key = current_zse if current_zse else "SUIVI DE CHANTIER"
+                        if active_key not in suivi_zones:
+                            suivi_zones[active_key] = {}
+                        suivi_zones[active_key][code] = suivi_zones[active_key].get(code, 0) + qty
 
-            if "PROCEDURE" in line.upper() or "PROC" in line.upper():
-                proc_clean = line.strip()
-                if proc_clean and proc_clean not in process_names and "LISTE" not in proc_clean:
-                    process_names.append(proc_clean)
+                # Capture du libellé exact du processus
+                if "PROCESSUS" in full_row_text.upper():
+                    proc_m = re.search(r"(PROCESSUS\s*N°\s*\d+\s*:[^\n]+)", full_row_text, re.IGNORECASE)
+                    if proc_m:
+                        proc_clean = proc_m.group(1).strip()
+                        proc_clean = re.sub(r"\s+[A-Z-]+(?:\(\d+\))?.*$", "", proc_clean).strip()
+                        if proc_clean and proc_clean not in process_names:
+                            process_names.append(proc_clean)
+
+        # Mode de secours en texte brut si l'extraction de tableau est vide
+        if not suivi_zones:
+            lines = (target_page.extract_text() or "").split("\n")
+            current_zse = None
+            for line in lines:
+                line_str = line.strip()
+                if "SUIVI DE CHANTIER" in line_str.upper():
+                    current_zse = re.sub(r"\s+[A-Z]\(\d+\).*", "", line_str).strip()
+
+                codes_found = re.findall(r"\b([A-Z]+(?:-[A-Z0-9]+)?)\s*\(\s*(\d+)\s*\)", line_str)
+                for code, qty_str in codes_found:
+                    qty = int(qty_str)
+                    if not code.startswith("G") and not code == "J-PROC" and not any(code.startswith(l) for l in ["U", "V", "X", "Y"]):
+                        active_key = current_zse if current_zse else "SUIVI DE CHANTIER"
+                        if active_key not in suivi_zones:
+                            suivi_zones[active_key] = {}
+                        suivi_zones[active_key][code] = suivi_zones[active_key].get(code, 0) + qty
 
     suivi_zones = {k: v for k, v in suivi_zones.items() if v}
     return site_info, g_objs_list, suivi_zones, j_procs, uv_objs, process_names
@@ -382,16 +416,16 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         interventions_to_create.append({"type_name": "Pose G", "description": desc_g})
         interventions_to_create.append({"type_name": "Dépose G", "description": desc_g})
 
-    # 2. Suivi : Libellé exact
+    # 2. Suivi : Découpage exact par Zone / Phase
     suivi_type_label = "Suivi 4h - Enviro + opé + MES + Mat"
     total_j_proc = sum(j_procs) if j_procs else 0
     j_proc_line = f"+ J-PROC ({total_j_proc})" if total_j_proc > 0 else ""
     proc_list_str = "\n".join(process_names) if process_names else ""
 
-    for zone_name, objs in suivi_zones.items():
+    for zse_label, objs in suivi_zones.items():
         if objs:
             measures_str = " / ".join([f"{k}: {v}" for k, v in objs.items()])
-            desc_lines = [f"{zone_name} : {measures_str}"]
+            desc_lines = [f"{zse_label} : {measures_str}"]
             if j_proc_line: 
                 desc_lines.append(j_proc_line)
             if proc_list_str: 
@@ -402,7 +436,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
                 "description": "\n".join(desc_lines)
             })
 
-    # 3. U, V, X, Y : Pose + Dépose par catégorie
+    # 3. U, V, X, Y : Pose + Dépose
     if uv_objs:
         by_category = {}
         for code, qty in uv_objs.items():
@@ -414,7 +448,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
             interventions_to_create.append({"type_name": f"Pose {cat}", "description": desc_cat})
             interventions_to_create.append({"type_name": f"Dépose {cat}", "description": desc_cat})
 
-    # Envoi vers Synchroteam
+    # Envoi Synchroteam
     for job in interventions_to_create:
         target_clean = normalize_string(job["type_name"])
         job_type_id = job_types_map.get(target_clean)
@@ -455,7 +489,6 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
 # 6. INTERFACE STREAMLIT
 # ==========================================
 
-# Barre latérale (Logo en haut à gauche + Utilisateur)
 with st.sidebar:
     try:
         st.image("ACD_WEB_RVB.png", use_container_width=True)
@@ -468,7 +501,6 @@ with st.sidebar:
         st.session_state.authenticated = False
         st.rerun()
 
-# En-tête principal : Titre stylisé et Logo ADC + Hippopotame à droite
 header_col1, header_col2 = st.columns([3, 1])
 with header_col1:
     st.markdown(
