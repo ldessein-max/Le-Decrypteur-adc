@@ -210,8 +210,26 @@ def get_or_create_customer(pdf_client_name):
         return res_create.json().get("id")
     return None
 
+def resolve_job_type_id(target_name, job_types_map):
+    """Recherche exacte puis par mot-clé précis pour éviter d'assigner 'Suivi 4h' par erreur."""
+    target_clean = target_name.strip().upper()
+    
+    # 1. Correspondance exacte
+    if target_clean in job_types_map:
+        return job_types_map[target_clean]
+    
+    # 2. Correspondance stricte sur les mots-clés (ex: POSE G / DÉPOSE U)
+    parts = target_clean.split()
+    if len(parts) >= 2:
+        action, code = parts[0], parts[1] # ex: POSE, G
+        for name, tid in job_types_map.items():
+            if action in name and f" {code}" in name:
+                return tid
+                
+    return None
+
 # ==========================================
-# 4. PARSER DE PDF (CORRIGÉ)
+# 4. PARSER DE PDF
 # ==========================================
 def parse_pdf_file(uploaded_file):
     site_info = {
@@ -376,13 +394,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
             interventions_to_create.append({"type_name": f"DÉPOSE {cat}", "description": desc_cat})
 
     for job in interventions_to_create:
-        target_name = job["type_name"].strip().upper()
-        job_type_id = job_types_map.get(target_name)
-        if not job_type_id:
-            for k, v in job_types_map.items():
-                if target_name in k or k in target_name:
-                    job_type_id = v
-                    break
+        job_type_id = resolve_job_type_id(job["type_name"], job_types_map)
 
         job_payload = {
             "customerId": customer_id,
