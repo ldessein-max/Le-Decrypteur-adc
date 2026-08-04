@@ -17,10 +17,13 @@ st.set_page_config(
     layout="centered"
 )
 
+# --- CONFIGURATION DU DOMAINE AUTORISÉ ---
+ALLOWED_DOMAIN = "adc-labo.fr"
+
 # Injection CSS pour le fond bleuté et le design moderne
 st.markdown("""
     <style>
-        /* Fond global de l'application (Bleu très doux / Slate Light) */
+        /* Fond global de l'application */
         .stApp {
             background-color: #F0F4F8;
         }
@@ -57,7 +60,7 @@ st.markdown("""
             border-radius: 12px;
         }
 
-        /* Titres et sous-titres */
+        /* Titres */
         h1 {
             color: #1E3A8A;
         }
@@ -72,7 +75,37 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. CONFIGURATION SYNCHROTEAM & HISTORIQUE
+# 2. GESTION AUTHENTIFICATION EMAIL PRO
+# ==========================================
+def check_auth():
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+
+    if not st.session_state.authenticated:
+        st.title("🦛 Le Décrypteur ADC")
+        st.caption("Connexion requise pour accéder à la plateforme")
+        st.divider()
+
+        with st.form("auth_form"):
+            email_input = st.text_input("Saisissez votre e-mail professionnel :", placeholder=f"exemple@{ALLOWED_DOMAIN}")
+            submit_button = st.form_submit_button("Se connecter", type="primary", use_container_width=True)
+
+            if submit_button:
+                clean_email = email_input.strip().lower()
+                if clean_email.endswith(f"@{ALLOWED_DOMAIN.lower()}"):
+                    st.session_state.authenticated = True
+                    st.session_state.user_email = clean_email
+                    st.rerun()
+                else:
+                    st.error(f"Accès refusé. Seules les adresses e-mail finissant par @{ALLOWED_DOMAIN} sont autorisées.")
+        return False
+    return True
+
+if not check_auth():
+    st.stop()
+
+# ==========================================
+# 3. CONFIGURATION SYNCHROTEAM & HISTORIQUE
 # ==========================================
 SYNCHROTEAM_DOMAIN = st.secrets["SYNCHROTEAM_DOMAIN"]
 SYNCHROTEAM_API_KEY = st.secrets["SYNCHROTEAM_API_KEY"]
@@ -190,7 +223,7 @@ def get_or_create_customer(pdf_client_name):
         return None
 
 # ==========================================
-# 3. PARSER DE PDF DYNAMIQUE
+# 4. PARSER DE PDF DYNAMIQUE
 # ==========================================
 def parse_pdf_file(uploaded_file):
     site_info = {
@@ -213,7 +246,7 @@ def parse_pdf_file(uploaded_file):
         for page in pdf.pages:
             full_text += (page.extract_text() or "") + "\n"
 
-        # 1. Cartouche Vert
+        # Cartouche Client/Site
         client_m = re.search(r"CLIENT\s*:\s*(.+)", full_text, re.IGNORECASE)
         if client_m:
             site_info["client"] = client_m.group(1).strip()
@@ -246,7 +279,7 @@ def parse_pdf_file(uploaded_file):
         if not site_info["name"]:
             site_info["name"] = uploaded_file.name.split(".")[0]
 
-        # 2. Lecture par Zone
+        # Lecture par Zone
         target_page = pdf.pages[-1]
         lines = (target_page.extract_text() or "").split("\n")
         current_zone = "Zone 1"
@@ -281,9 +314,9 @@ def parse_pdf_file(uploaded_file):
     return site_info, g_objs, suivi_zones, j_procs, uv_objs, process_names
 
 # ==========================================
-# 4. TRAITEMENT & SYNCHROTEAM
+# 5. TRAITEMENT & SYNCHROTEAM
 # ==========================================
-def process_single_pdf(uploaded_file, job_types_map):
+def process_single_pdf(uploaded_file, job_types_map, user_email):
     logs = []
     created_jobs_count = 0
     site_info, g_objs, suivi_zones, j_procs, uv_objs, process_names = parse_pdf_file(uploaded_file)
@@ -381,9 +414,11 @@ def process_single_pdf(uploaded_file, job_types_map):
         else:
             logs.append(f"❌ Erreur création intervention `{job['type_name']}`")
 
+    # Enregistrement avec l'e-mail de l'utilisateur
     history_entry = {
         "timestamp": datetime.now().isoformat(),
         "date_str": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "user_email": user_email,
         "filename": uploaded_file.name,
         "client": site_info["client"],
         "site": site_info["name"],
@@ -394,14 +429,23 @@ def process_single_pdf(uploaded_file, job_types_map):
     return True, f"Dossier **{site_info['name']}** traité avec succès !", logs, created_jobs_count
 
 # ==========================================
-# 5. INTERFACE UTILISATEUR
+# 6. INTERFACE PRINCIPALE
 # ==========================================
-st.title("🦛 Le Décrypteur ADC")
-st.caption("Importation et création automatique des sites et interventions PDF vers Synchroteam")
+# En-tête avec déconnexion
+header_col1, header_col2 = st.columns([4, 1])
+with header_col1:
+    st.title("🦛 Le Décrypteur ADC")
+    st.caption("Importation et création automatique des sites et interventions PDF vers Synchroteam")
+with header_col2:
+    st.write(f"👤 **{st.session_state.user_email.split('@')[0]}**")
+    if st.button("Déconnexion", type="secondary", use_container_width=True):
+        st.session_state.authenticated = False
+        st.session_state.user_email = ""
+        st.rerun()
 
 job_types_map = fetch_job_types_map()
 
-# Indicateurs de statut
+# Metrics
 col1, col2 = st.columns(2)
 with col1:
     st.metric(label="Statut API Synchroteam", value="Connecté", delta=f"{len(job_types_map)} types d'int.")
@@ -424,7 +468,7 @@ with tab_import:
         if st.button(f"⚡ Lancer le traitement des {len(uploaded_files)} fichier(s)", type="primary", use_container_width=True):
             for file in uploaded_files:
                 with st.expander(f"⚙️ Traitement de : {file.name}", expanded=True):
-                    success, message, logs, count = process_single_pdf(file, job_types_map)
+                    success, message, logs, count = process_single_pdf(file, job_types_map, st.session_state.user_email)
                     for log in logs:
                         st.markdown(log)
                     if success:
@@ -442,7 +486,8 @@ with tab_history:
         for entry in history_data:
             with st.container():
                 c1, c2, c3 = st.columns([2, 3, 2])
-                c1.write(f"📅 **{entry['date_str']}**")
+                user_label = entry.get('user_email', 'Utilisateur inconnu')
+                c1.write(f"📅 **{entry['date_str']}**\n\n👤 `{user_label}`")
                 c2.write(f"🏢 **{entry['client']}**\n📍 {entry['site']}")
                 c3.caption(f"⚙️ {entry['jobs_count']} int. créée(s)")
                 st.divider()
