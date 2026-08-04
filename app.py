@@ -10,7 +10,7 @@ import requests
 import streamlit as st
 
 # ==========================================
-# 1. CONFIGURATION STREAMLIT & STYLES CSS
+# 1. CONFIGURATION STREAMLIT & STYLES
 # ==========================================
 st.set_page_config(
     page_title="Le Décrypteur ADC",
@@ -52,7 +52,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. GESTION AUTHENTIFICATION
+# 2. AUTHENTIFICATION
 # ==========================================
 def check_auth():
     if "authenticated" not in st.session_state:
@@ -82,7 +82,7 @@ if not check_auth():
     st.stop()
 
 # ==========================================
-# 3. CONFIGURATION SYNCHROTEAM & HISTORIQUE
+# 3. SYNCHROTEAM & HISTORIQUE
 # ==========================================
 SYNCHROTEAM_DOMAIN = st.secrets["SYNCHROTEAM_DOMAIN"]
 SYNCHROTEAM_API_KEY = st.secrets["SYNCHROTEAM_API_KEY"]
@@ -129,12 +129,7 @@ def load_history():
         with open(HISTORY_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         cutoff = datetime.now() - timedelta(days=2)
-        valid_history = []
-        for item in data:
-            item_date = datetime.fromisoformat(item["timestamp"])
-            if item_date >= cutoff:
-                valid_history.append(item)
-        return valid_history
+        return [item for item in data if datetime.fromisoformat(item["timestamp"]) >= cutoff]
     except Exception:
         return []
 
@@ -146,43 +141,32 @@ def save_history_entry(entry):
 
 def fetch_job_types_map():
     job_types_map = {}
-    endpoints_to_test = [
-        "/jobType/list",
-        "/job/types",
-        "/job/type/list"
-    ]
+    endpoints = ["/jobType/list", "/job/types", "/job/type/list"]
     
-    raw_response = None
-    successful_endpoint = None
-
-    for ep in endpoints_to_test:
-        url = build_url(ep)
+    for ep in endpoints:
         try:
-            res = requests.get(url, headers=HEADERS, timeout=10)
+            res = requests.get(build_url(ep), headers=HEADERS, timeout=10)
             if res.status_code == 200:
-                raw_response = res.json()
-                successful_endpoint = ep
+                data = res.json()
+                records = data.get("data", []) if isinstance(data, dict) else data
+                for item in records:
+                    if isinstance(item, dict) and "name" in item and "id" in item:
+                        # On stocke en majuscules sans espaces superflus pour le mapping
+                        clean_key = normalize_string(item["name"])
+                        job_types_map[clean_key] = item["id"]
+                st.toast("Types d'interventions chargés", icon="✅")
                 break
         except Exception:
             continue
 
-    if raw_response:
-        records = raw_response.get("data", []) if isinstance(raw_response, dict) else raw_response
-        for item in records:
-            if isinstance(item, dict) and "name" in item and "id" in item:
-                clean_name = normalize_string(item["name"])
-                job_types_map[clean_name] = item["id"]
-        
-        st.toast(f"Types chargés avec succès", icon="✅")
-    else:
-        st.error("⚠️ Impossible de récupérer les types d'interventions depuis Synchroteam.")
+    if not job_types_map:
+        st.error("⚠️ Erreur lors de la récupération des types Synchroteam.")
 
     return job_types_map
 
 def find_existing_site_by_myid(myid):
-    search_url = build_url(f"/site/list?myId={requests.utils.quote(myid)}")
     try:
-        res = requests.get(search_url, headers=HEADERS, timeout=10)
+        res = requests.get(build_url(f"/site/list?myId={requests.utils.quote(myid)}"), headers=HEADERS, timeout=10)
         if res.status_code == 200:
             data = res.json()
             sites = data.get("data", []) if isinstance(data, dict) else data
@@ -194,18 +178,16 @@ def find_existing_site_by_myid(myid):
     return None, None
 
 def get_or_create_customer(pdf_client_name):
-    search_url = build_url(f"/customer/list?name={requests.utils.quote(pdf_client_name)}")
     try:
-        res_search = requests.get(search_url, headers=HEADERS, timeout=10)
+        res_search = requests.get(build_url(f"/customer/list?name={requests.utils.quote(pdf_client_name)}"), headers=HEADERS, timeout=10)
         if res_search.status_code == 200:
             data = res_search.json()
             clients = data.get("data", []) if isinstance(data, dict) else data
-
             for c in clients:
                 if normalize_string(c.get("name", "")) == normalize_string(pdf_client_name):
                     return c.get("id")
-    except Exception as e:
-        st.warning(f"Note recherche client : {e}")
+    except Exception:
+        pass
 
     clean_myid = re.sub(r"[^A-Za-z0-9]", "", pdf_client_name).upper()[:20]
     payload = {
@@ -216,39 +198,16 @@ def get_or_create_customer(pdf_client_name):
         "zipCode": "75000",
         "country": "France"
     }
-
     res_create = safe_post(build_url("/customer/send"), payload)
     if res_create and res_create.status_code in [200, 201]:
         return res_create.json().get("id")
     return None
 
-def resolve_job_type_id(target_label, job_types_map):
-    target_clean = normalize_string(target_label)
-    
-    # 1. Recherche exacte
-    if target_clean in job_types_map:
-        return job_types_map[target_clean]
-    
-    # 2. Recherche tolérante (ex: "POSE G" vs "POSE DE G")
-    for name_clean, type_id in job_types_map.items():
-        if target_clean in name_clean or name_clean in target_clean:
-            return type_id
-
-    return None
-
 # ==========================================
-# 4. PARSER DE PDF
+# 4. PARSER PDF
 # ==========================================
 def parse_pdf_file(uploaded_file):
-    site_info = {
-        "client": "",
-        "name": "",
-        "myid": "",
-        "address": "",
-        "zip": "",
-        "city": ""
-    }
-    
+    site_info = {"client": "", "name": "", "myid": "", "address": "", "zip": "", "city": ""}
     g_objs_list = []
     uv_objs = {}
     suivi_zones = {}
@@ -256,13 +215,10 @@ def parse_pdf_file(uploaded_file):
     process_names = []
 
     with pdfplumber.open(uploaded_file) as pdf:
-        full_text = ""
-        for page in pdf.pages:
-            full_text += (page.extract_text() or "") + "\n"
+        full_text = "".join([(page.extract_text() or "") + "\n" for page in pdf.pages])
 
         client_m = re.search(r"CLIENT\s*:\s*(.+)", full_text, re.IGNORECASE)
-        if client_m:
-            site_info["client"] = client_m.group(1).strip()
+        if client_m: site_info["client"] = client_m.group(1).strip()
 
         dossier_m = re.search(r"DOSSIER\s*N°\s*:\s*([^\n(]+)\s*\(([^)]+)\)", full_text, re.IGNORECASE)
         if dossier_m:
@@ -273,16 +229,13 @@ def parse_pdf_file(uploaded_file):
         if adresse_m:
             raw_addr = adresse_m.group(1).strip()
             site_info["address"] = raw_addr
-            
             cp_ville_m = re.search(r"(\d{5})\s+(.+)", raw_addr)
             if cp_ville_m:
                 site_info["zip"] = cp_ville_m.group(1)
                 site_info["city"] = cp_ville_m.group(2).strip()
 
-        if not site_info["client"]:
-            site_info["client"] = "CLIENT INCONNU"
-        if not site_info["name"]:
-            site_info["name"] = uploaded_file.name.split(".")[0]
+        if not site_info["client"]: site_info["client"] = "CLIENT INCONNU"
+        if not site_info["name"]: site_info["name"] = uploaded_file.name.split(".")[0]
 
         target_page = pdf.pages[-1]
         lines = (target_page.extract_text() or "").split("\n")
@@ -290,16 +243,13 @@ def parse_pdf_file(uploaded_file):
 
         for line in lines:
             zone_match = re.search(r"\b(Zone\s*\d+)\b", line, re.IGNORECASE)
-            if zone_match:
-                current_zone = zone_match.group(1).title()
+            if zone_match: current_zone = zone_match.group(1).title()
 
-            if current_zone not in suivi_zones:
-                suivi_zones[current_zone] = {}
+            if current_zone not in suivi_zones: suivi_zones[current_zone] = {}
 
             codes_found = re.findall(r"\b([A-Z]+(?:-[A-Z0-9]+)?)\s*\(\s*(\d+)\s*\)", line)
             for code, qty_str in codes_found:
                 qty = int(qty_str)
-
                 if code.startswith("G"):
                     g_objs_list.append({code: qty})
                 elif any(code.startswith(letter) for letter in ["U", "V", "X", "Y"]):
@@ -318,7 +268,7 @@ def parse_pdf_file(uploaded_file):
     return site_info, g_objs_list, suivi_zones, j_procs, uv_objs, process_names
 
 # ==========================================
-# 5. TRAITEMENT & SYNCHROTEAM
+# 5. TRAITEMENT ET CRÉATION
 # ==========================================
 def process_single_pdf(uploaded_file, job_types_map, user_email):
     logs = []
@@ -333,40 +283,38 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
 
     if site_id and customer_id:
         site_existed = True
-        logs.append(f"🔗 **Site existant trouvé** (ID: `{site_id}`). Rattachement direct...")
+        logs.append(f"🔗 **Site existant trouvé** (ID: `{site_id}`).")
     else:
-        logs.append("🔍 Site non trouvé. Création du dossier...")
+        logs.append("🔍 Création du site...")
         customer_id = get_or_create_customer(site_info["client"])
         if not customer_id:
-            return False, "Échec récupération/création du Client.", logs, 0
+            return False, "Échec client.", logs, 0
 
         site_payload = {
             "name": site_info["name"],
             "myId": site_info["myid"],
-            "address": site_info["address"] if site_info["address"] else "À renseigner",
-            "city": site_info["city"] if site_info["city"] else "Paris",
-            "zipCode": site_info["zip"] if site_info["zip"] else "75000",
+            "address": site_info["address"] or "À renseigner",
+            "city": site_info["city"] or "Paris",
+            "zipCode": site_info["zip"] or "75000",
             "country": "France",
             "customerId": customer_id,
         }
-
         res_site = safe_post(build_url("/site/send"), site_payload)
         if not res_site or res_site.status_code not in [200, 201]:
-            err_msg = res_site.text if res_site else "Erreur réseau"
-            return False, f"Échec création du site : {err_msg}", logs, 0
+            return False, "Échec création du site.", logs, 0
 
         site_id = res_site.json().get("id")
-        logs.append(f"✅ Nouveau site créé dans Synchroteam (ID: `{site_id}`)")
+        logs.append(f"✅ Site créé (ID: `{site_id}`)")
 
     interventions_to_create = []
 
-    # G
+    # 1. G : Une Pose + Une Dépose
     for g_item in g_objs_list:
         desc_g = " / ".join([f"{k}: {v}" for k, v in g_item.items()])
         interventions_to_create.append({"type_name": "Pose G", "description": desc_g})
         interventions_to_create.append({"type_name": "Dépose G", "description": desc_g})
 
-    # Suivi 4h
+    # 2. SUIVI : Libellé strict
     suivi_type_label = "Suivi 4h - Enviro + opé + MES + Mat"
     total_j_proc = sum(j_procs) if j_procs else 0
     j_proc_line = f"+ J-PROC ({total_j_proc})" if total_j_proc > 0 else ""
@@ -376,59 +324,50 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         if objs:
             measures_str = " / ".join([f"{k}: {v}" for k, v in objs.items()])
             desc_lines = [f"{zone_name} : {measures_str}"]
-            if j_proc_line:
-                desc_lines.append(j_proc_line)
-            if proc_list_str:
-                desc_lines.append(proc_list_str)
+            if j_proc_line: desc_lines.append(j_proc_line)
+            if proc_list_str: desc_lines.append(proc_list_str)
 
             interventions_to_create.append({
                 "type_name": suivi_type_label,
                 "description": "\n".join(desc_lines)
             })
 
-    # U, V, X, Y
+    # 3. U, V, X, Y : Une Pose + Une Dépose par catégorie
     if uv_objs:
         by_category = {}
         for code, qty in uv_objs.items():
             cat = code.split("-")[0].upper()
-            if cat not in by_category:
-                by_category[cat] = []
-            by_category[cat].append(f"{code}: {qty}")
+            by_category.setdefault(cat, []).append(f"{code}: {qty}")
 
         for cat, list_measures in by_category.items():
             desc_cat = " / ".join(list_measures)
-            
-            pose_label = f"Pose {cat}"
-            depose_label = f"Dépose {cat}"
-            
-            interventions_to_create.append({"type_name": pose_label, "description": desc_cat})
-            interventions_to_create.append({"type_name": depose_label, "description": desc_cat})
+            interventions_to_create.append({"type_name": f"Pose {cat}", "description": desc_cat})
+            interventions_to_create.append({"type_name": f"Dépose {cat}", "description": desc_cat})
 
+    # Création dans Synchroteam
     for job in interventions_to_create:
-        job_type_id = resolve_job_type_id(job["type_name"], job_types_map)
+        target_clean = normalize_string(job["type_name"])
+        job_type_id = job_types_map.get(target_clean)
 
         job_payload = {
             "customerId": customer_id,
             "siteId": site_id,
-            "description": job["description"],
+            "description": job["description"]
         }
-        
+
         if job_type_id:
-            job_payload["jobTypeId"] = int(job_type_id)
             job_payload["type"] = {"id": int(job_type_id)}
-            job_payload["typeId"] = int(job_type_id)
-            logs.append(f"⚙️ `[{job['type_name']}]` -> ID appliqué : `{job_type_id}`")
+            logs.append(f"⚙️ `[{job['type_name']}]` -> ID : `{job_type_id}`")
         else:
-            logs.append(f"⚠️ `[{job['type_name']}]` -> ID INTROUVABLE DANS L'API")
+            logs.append(f"⚠️ `[{job['type_name']}]` NON TROUVÉ DANS L'API (Défaut appliqué par Synchroteam)")
 
         res_job = safe_post(build_url("/job/send"), job_payload)
         if res_job and res_job.status_code in [200, 201]:
             created_jobs_count += 1
         else:
-            err_body = res_job.text if res_job else "Pas de réponse"
-            logs.append(f"❌ Erreur API Synchroteam pour `{job['type_name']}` : {err_body}")
+            logs.append(f"❌ Erreur `{job['type_name']}` : {res_job.text if res_job else 'Réseau'}")
 
-    history_entry = {
+    save_history_entry({
         "timestamp": datetime.now().isoformat(),
         "date_str": datetime.now().strftime("%d/%m/%Y %H:%M"),
         "user_email": user_email,
@@ -437,77 +376,47 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         "site": site_info["name"],
         "jobs_count": created_jobs_count,
         "attached_to_existing": site_existed
-    }
-    save_history_entry(history_entry)
+    })
 
-    status_txt = "rattachées au site existant" if site_existed else "créées avec le nouveau site"
-    return True, f"Dossier **{site_info['name']}** : {created_jobs_count} intervention(s) {status_txt} !", logs, created_jobs_count
+    return True, f"Dossier **{site_info['name']}** traité avec succès !", logs, created_jobs_count
 
 # ==========================================
-# 6. INTERFACE PRINCIPALE
+# 6. UI STREAMLIT
 # ==========================================
 header_col1, header_col2 = st.columns([4, 1])
 with header_col1:
     st.title("🦛 Le Décrypteur ADC")
-    st.caption("Importation et création automatique des sites et interventions PDF vers Synchroteam")
+    st.caption("Importation et création automatique")
 with header_col2:
     st.write(f"👤 **{st.session_state.user_email.split('@')[0]}**")
-    if st.button("Déconnexion", type="secondary", use_container_width=True):
+    if st.button("Déconnexion"):
         st.session_state.authenticated = False
-        st.session_state.user_email = ""
         st.rerun()
 
 job_types_map = fetch_job_types_map()
 
-# Metrics
 col1, col2 = st.columns(2)
-with col1:
-    st.metric(label="Statut API Synchroteam", value="Connecté", delta=f"{len(job_types_map)} types d'int.")
-with col2:
-    history_data = load_history()
-    st.metric(label="Dossiers traités (48h)", value=len(history_data))
+with col1: st.metric("Statut API", "Connecté", f"{len(job_types_map)} types")
+with col2: st.metric("Dossiers (48h)", len(load_history()))
 
-with st.expander("🔍 Dictionnaire des types chargés (Vérification de sécurité)"):
+with st.expander("🔍 Vérification des types d'interventions chargés"):
     st.json(job_types_map)
 
 st.markdown("---")
 
-tab_import, tab_history = st.tabs(["🚀 Nouvel Import", "📜 Historique (48h)"])
+tab_import, tab_history = st.tabs(["🚀 Import", "📜 Historique"])
 
 with tab_import:
-    uploaded_files = st.file_uploader(
-        "Glissez-déposez vos stratégies PDF ci-dessous",
-        type=["pdf"],
-        accept_multiple_files=True
-    )
-
-    if uploaded_files:
-        if st.button(f"⚡ Lancer le traitement ({len(uploaded_files)} fichier(s))", type="primary", use_container_width=True):
-            for file in uploaded_files:
-                with st.expander(f"⚙️ Traitement de : {file.name}", expanded=True):
-                    success, message, logs, count = process_single_pdf(
-                        file, job_types_map, st.session_state.user_email
-                    )
-                    for log in logs:
-                        st.markdown(log)
-                    if success:
-                        st.success(message)
-                    else:
-                        st.error(message)
+    uploaded_files = st.file_uploader("Fichiers PDF", type=["pdf"], accept_multiple_files=True)
+    if uploaded_files and st.button(f"Lancer ({len(uploaded_files)})", type="primary", use_container_width=True):
+        for file in uploaded_files:
+            with st.expander(f"Traitement : {file.name}", expanded=True):
+                ok, msg, logs, _ = process_single_pdf(file, job_types_map, st.session_state.user_email)
+                for log in logs: st.markdown(log)
+                if ok: st.success(msg)
+                else: st.error(msg)
 
 with tab_history:
-    st.subheader("Dossiers traités au cours des 48 dernières heures")
-    history_data = load_history()
-    
-    if not history_data:
-        st.info("Aucun historique récent enregistré pour les dernières 48 heures.")
-    else:
-        for entry in history_data:
-            with st.container():
-                c1, c2, c3 = st.columns([2, 3, 2])
-                user_label = entry.get('user_email', 'Utilisateur inconnu')
-                tag_site = " 🔗 (Site existant)" if entry.get("attached_to_existing") else " ✨ (Nouveau site)"
-                c1.write(f"📅 **{entry['date_str']}**\n\n👤 `{user_label}`")
-                c2.write(f"🏢 **{entry['client']}**\n📍 {entry['site']}{tag_site}")
-                c3.caption(f"⚙️ {entry['jobs_count']} int. créée(s)")
-                st.divider()
+    for entry in load_history():
+        st.write(f"📅 **{entry['date_str']}** | 🏢 **{entry['client']}** | 📍 {entry['site']}")
+        st.divider()
