@@ -153,6 +153,7 @@ def fetch_job_types_map():
                 data = res.json()
                 records = data.get("data", [])
                 for item in records:
+                    # Stocke exactement le nom retourné par Synchroteam (en majuscules pour comparaison stricte)
                     clean_name = item["name"].strip().upper()
                     job_types_map[clean_name] = item["id"]
 
@@ -210,23 +211,10 @@ def get_or_create_customer(pdf_client_name):
         return res_create.json().get("id")
     return None
 
-def resolve_job_type_id(target_name, job_types_map):
-    """Résolution stricte du type d'intervention."""
-    target_clean = target_name.strip().upper()
-    
-    # 1. Correspondance exacte
-    if target_clean in job_types_map:
-        return job_types_map[target_clean]
-
-    # 2. Recherche par correspondance d'éléments exacts (ex: "POSE" et "G")
-    target_words = set(target_clean.split())
-    for name, tid in job_types_map.items():
-        name_words = set(name.upper().split())
-        # Si tous les mots de l'intervention cible sont présents dans le nom Synchroteam
-        if target_words.issubset(name_words):
-            return tid
-
-    return None
+def resolve_job_type_id(target_label, job_types_map):
+    """Mappe directement vers l'ID exact récupéré de l'API Synchroteam."""
+    target_clean = target_label.strip().upper()
+    return job_types_map.get(target_clean)
 
 # ==========================================
 # 4. PARSER DE PDF
@@ -353,14 +341,16 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         site_id = res_site.json().get("id")
         logs.append(f"✅ Nouveau site créé dans Synchroteam (ID: `{site_id}`)")
 
-    # 3. Création des interventions
+    # 3. Création des interventions avec les EXACTES CORRESPONDANCES SYNCHROTEAM
     interventions_to_create = []
 
+    # G
     for g_item in g_objs_list:
         desc_g = " / ".join([f"{k}: {v}" for k, v in g_item.items()])
-        interventions_to_create.append({"type_name": "POSE G", "description": desc_g})
-        interventions_to_create.append({"type_name": "DÉPOSE G", "description": desc_g})
+        interventions_to_create.append({"type_name": "Pose G", "description": desc_g})
+        interventions_to_create.append({"type_name": "Dépose G", "description": desc_g})
 
+    # Suivi 4h
     suivi_type_label = "Suivi 4h - Enviro + opé + MES + Mat"
     total_j_proc = sum(j_procs) if j_procs else 0
     j_proc_line = f"+ J-PROC ({total_j_proc})" if total_j_proc > 0 else ""
@@ -380,6 +370,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
                 "description": "\n".join(desc_lines)
             })
 
+    # U, V, X, Y (Mapping dynamique sur les libellés exacts)
     if uv_objs:
         by_category = {}
         for code, qty in uv_objs.items():
@@ -390,8 +381,13 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
 
         for cat, list_measures in by_category.items():
             desc_cat = " / ".join(list_measures)
-            interventions_to_create.append({"type_name": f"POSE {cat}", "description": desc_cat})
-            interventions_to_create.append({"type_name": f"DÉPOSE {cat}", "description": desc_cat})
+            
+            # Gestion explicite des cas spécifiques (ex: Pose de V sur 4h vs Pose V)
+            pose_label = "Pose de V sur 4h" if cat == "V" and "Pose de V sur 4h" in [k.title() for k in job_types_map.keys()] else f"Pose {cat}"
+            depose_label = "Dépose V de 4h" if cat == "V" and "Dépose V de 4h" in [k.title() for k in job_types_map.keys()] else f"Dépose {cat}"
+            
+            interventions_to_create.append({"type_name": pose_label, "description": desc_cat})
+            interventions_to_create.append({"type_name": depose_label, "description": desc_cat})
 
     for job in interventions_to_create:
         job_type_id = resolve_job_type_id(job["type_name"], job_types_map)
@@ -401,12 +397,13 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
             "siteId": site_id,
             "description": job["description"],
         }
+        
         if job_type_id:
             job_payload["type"] = {"id": job_type_id}
 
         res_job = safe_post(build_url("/job/send"), job_payload)
         if res_job and res_job.status_code in [200, 201]:
-            logs.append(f"⚙️ Intervention `{job['type_name']}` créée (Type ID: `{job_type_id or 'Défaut'}`).")
+            logs.append(f"⚙️ Intervention `{job['type_name']}` créée (Type ID: `{job_type_id}`).")
             created_jobs_count += 1
         else:
             logs.append(f"❌ Erreur création intervention `{job['type_name']}`")
