@@ -386,6 +386,12 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
 
     interventions_to_create = []
 
+    # Mapping spécifique pour les libellés API non standards
+    LABEL_MAPPING = {
+        "D": {"pose": "Pose conditions ambiantes (D)", "depose": "Dépose conditions ambiantes (D)"},
+        "E": {"pose": "Pose Mesures après sinistre (E)", "depose": "Dépose Mesures après sinistre (E)"}
+    }
+
     # 1. Traitement par Phase pour D, E, G, U, V, X, Y (Génération Pose & Dépose distinctes)
     for phase_label, code_dict in phase_pair_objs.items():
         by_category = {}
@@ -395,8 +401,16 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
 
         for cat, list_measures in by_category.items():
             desc_cat = f"{phase_label} : " + " / ".join(list_measures)
-            interventions_to_create.append({"type_name": f"Pose {cat}", "description": desc_cat})
-            interventions_to_create.append({"type_name": f"Dépose {cat}", "description": desc_cat})
+            
+            if cat in LABEL_MAPPING:
+                pose_label = LABEL_MAPPING[cat]["pose"]
+                depose_label = LABEL_MAPPING[cat]["depose"]
+            else:
+                pose_label = f"Pose {cat}"
+                depose_label = f"Dépose {cat}"
+
+            interventions_to_create.append({"type_name": pose_label, "description": desc_cat})
+            interventions_to_create.append({"type_name": depose_label, "description": desc_cat})
 
     # 2. Suivis 4h par Phase (Intégration N, Q, R, L + J-PROC & Intitulé Processus)
     suivi_type_label = "Suivi 4h - Enviro + opé + MES + Mat"
