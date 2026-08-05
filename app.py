@@ -258,8 +258,22 @@ def get_or_create_customer(pdf_client_name):
     return None
 
 # ==========================================
-# 4. PARSER PDF (REGROUPEMENT SUIVI PAR ZONE UNIQUE ET CAPTURE PROCESSUS)
+# 4. PARSER PDF (RECONSTRUCTION ET FUSION PAR ZONE CANONIQUE)
 # ==========================================
+def extract_zone_num(text):
+    """ Extrait le numéro de zone/phase pour tout unifier sous un nom propre (ex: Zone 1) """
+    if not text:
+        return None
+    
+    # Exclure les faux positifs issus des entêtes de tableau
+    if any(k in text.upper() for k in ["LISTE", "TYPE", "MESURE", "MES", "AUTRE"]):
+        return None
+
+    m = re.search(r"(?:SUIVI DE CHANTIER\s*-\s*Zone|Zone|Phase|ZSE\s*#?)\s*(\d+)", text, re.IGNORECASE)
+    if m:
+        return f"Zone {m.group(1)}"
+    return None
+
 def parse_pdf_file(uploaded_file):
     site_info = {"client": "", "name": "", "myid": "", "address": "", "zip": "", "city": ""}
     suivi_zones = {}
@@ -296,7 +310,7 @@ def parse_pdf_file(uploaded_file):
         target_page = pdf.pages[-1]
         tables = target_page.extract_tables()
 
-        current_phase = "Phase 1"
+        current_zone = "Zone 1"  # Valeur par défaut si rien n'est trouvé
 
         for table in tables:
             for row in table:
@@ -306,19 +320,16 @@ def parse_pdf_file(uploaded_file):
                 cell_zse = row[0].strip() if len(row) > 0 and row[0] else ""
                 full_row_text = " ".join([c for c in row if c])
 
-                # Extraction propre de la zone principale (ex: SUIVI DE CHANTIER - Zone 1)
-                raw_zone = cell_zse.strip() if cell_zse else full_row_text
-                zone_m = re.search(r"((?:SUIVI DE CHANTIER\s*-\s*Zone\s*\d+)|(?:Phase\s*[\d\.]+)|(?:ZSE\s*#?[\d\.]+)|(?:Zone\s*[\d\.]+))", raw_zone, re.IGNORECASE)
-                if zone_m:
-                    current_phase = zone_m.group(1).strip()
-                elif cell_zse and "MESURE" not in cell_zse.upper() and "LISTE" not in cell_zse.upper():
-                    current_phase = cell_zse.strip()
+                # Détection stricte de zone : si la ligne contient une nouvelle zone, on met à jour
+                extracted_z = extract_zone_num(cell_zse) or extract_zone_num(full_row_text)
+                if extracted_z:
+                    current_zone = extracted_z
 
-                if current_phase not in suivi_zones:
-                    suivi_zones[current_phase] = {"measures": {}, "j_proc": 0}
+                if current_zone not in suivi_zones:
+                    suivi_zones[current_zone] = {"measures": {}, "j_proc": 0}
 
-                if current_phase not in phase_pair_objs:
-                    phase_pair_objs[current_phase] = {}
+                if current_zone not in phase_pair_objs:
+                    phase_pair_objs[current_zone] = {}
 
                 # Extraction des paires Code (Quantité)
                 codes_found = re.findall(r"\b([A-Z]+(?:-[A-Z0-9]+)?)\s*\(\s*(\d+)\s*\)", full_row_text)
@@ -326,21 +337,21 @@ def parse_pdf_file(uploaded_file):
                     qty = int(qty_str)
                     
                     if any(code.startswith(letter) for letter in ["D", "E", "G", "U", "V", "X", "Y"]):
-                        phase_pair_objs[current_phase][code] = phase_pair_objs[current_phase].get(code, 0) + qty
+                        phase_pair_objs[current_zone][code] = phase_pair_objs[current_zone].get(code, 0) + qty
                     elif code == "J-PROC":
                         total_j_proc += qty
                     else:
-                        measures = suivi_zones[current_phase]["measures"]
+                        measures = suivi_zones[current_zone]["measures"]
                         measures[code] = measures.get(code, 0) + qty
 
-                # Capture exacte des intitulés de processus (PRO / PROCESSUS)
+                # Capture unique des processus opérateur
                 for cell in row:
                     if cell and ("PRO" in cell.upper() or "PROCESSUS" in cell.upper()):
                         proc_clean = re.sub(r"\s+", " ", cell).strip()
                         if proc_clean and proc_clean not in process_names and not re.match(r"^J-PROC", proc_clean, re.I):
                             process_names.append(proc_clean)
 
-    # Affectation globale du J-PROC à la zone de suivi
+    # Attribution du J-PROC sur les zones
     for zone in suivi_zones:
         suivi_zones[zone]["j_proc"] = total_j_proc
 
@@ -395,15 +406,15 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         "E": {"pose": "Pose Mesures après sinistre (E)", "depose": "Dépose Mesures après sinistre (E)"}
     }
 
-    # 1. Traitement Pose / Dépose pour G, U, V, D, E, etc.
-    for phase_label, code_dict in phase_pair_objs.items():
+    # 1. Traitement Pose / Dépose
+    for zone_label, code_dict in phase_pair_objs.items():
         by_category = {}
         for code, qty in code_dict.items():
             cat = code.split("-")[0].upper()
             by_category.setdefault(cat, []).append(f"{code}: {qty}")
 
         for cat, list_measures in by_category.items():
-            desc_cat = f"{phase_label} : " + " / ".join(list_measures)
+            desc_cat = f"{zone_label} : " + " / ".join(list_measures)
             
             if cat in LABEL_MAPPING:
                 pose_label = LABEL_MAPPING[cat]["pose"]
@@ -415,15 +426,15 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
             interventions_to_create.append({"type_name": pose_label, "description": desc_cat})
             interventions_to_create.append({"type_name": depose_label, "description": desc_cat})
 
-    # 2. Construction de l'intervention unique "Suivi 4h..." selon le format validé
+    # 2. Une SEULE intervention "Suivi 4h..." par Zone unique
     suivi_type_label = "Suivi 4h - Enviro + opé + MES + Mat"
 
-    for phase_label, phase_data in suivi_zones.items():
-        measures_dict = phase_data["measures"]
-        j_proc_qty = phase_data["j_proc"]
+    for zone_label, zone_data in suivi_zones.items():
+        measures_dict = zone_data["measures"]
+        j_proc_qty = zone_data["j_proc"]
 
         measures_str = " / ".join([f"{k}({v})" for k, v in measures_dict.items()])
-        desc_lines = [f"{phase_label} : {measures_str}"]
+        desc_lines = [f"SUIVI DE CHANTIER - {zone_label} : {measures_str}"]
         
         if j_proc_qty > 0 or process_names:
             desc_lines.append(f"J-PROC ({j_proc_qty if j_proc_qty > 0 else 1})")
