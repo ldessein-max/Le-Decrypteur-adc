@@ -263,7 +263,7 @@ def get_or_create_customer(pdf_client_name):
 def parse_pdf_file(uploaded_file):
     site_info = {"client": "", "name": "", "myid": "", "address": "", "zip": "", "city": ""}
     g_objs_list = []
-    uv_objs = {}
+    pair_objs = {} # Regroupe D, E, U, V, X, Y
     suivi_zones = {}
     process_names = []
 
@@ -321,8 +321,8 @@ def parse_pdf_file(uploaded_file):
                     
                     if code.startswith("G"):
                         g_objs_list.append({code: qty})
-                    elif any(code.startswith(letter) for letter in ["U", "V", "X", "Y"]):
-                        uv_objs[code] = qty
+                    elif any(code.startswith(letter) for letter in ["D", "E", "U", "V", "X", "Y"]):
+                        pair_objs[code] = qty
                     elif code == "J-PROC":
                         suivi_zones[current_phase]["j_proc"] += qty
                     else:
@@ -341,7 +341,7 @@ def parse_pdf_file(uploaded_file):
                             process_names.append(proc_clean)
 
     suivi_zones = {k: v for k, v in suivi_zones.items() if v["measures"] or v["j_proc"] > 0}
-    return site_info, g_objs_list, suivi_zones, uv_objs, process_names
+    return site_info, g_objs_list, suivi_zones, pair_objs, process_names
 
 # ==========================================
 # 5. TRAITEMENT SYNCHROTEAM
@@ -349,7 +349,7 @@ def parse_pdf_file(uploaded_file):
 def process_single_pdf(uploaded_file, job_types_map, user_email):
     logs = []
     created_jobs_count = 0
-    site_info, g_objs_list, suivi_zones, uv_objs, process_names = parse_pdf_file(uploaded_file)
+    site_info, g_objs_list, suivi_zones, pair_objs, process_names = parse_pdf_file(uploaded_file)
     
     logs.append(f"📄 **Fichier :** `{uploaded_file.name}`")
     logs.append(f"📍 **Dossier :** `{site_info['name']}` (Réf.: `{site_info['myid']}`)")
@@ -410,10 +410,10 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
             "description": "\n".join(desc_lines)
         })
 
-    # 3. U, V, X, Y
-    if uv_objs:
+    # 3. D, E, U, V, X, Y
+    if pair_objs:
         by_category = {}
-        for code, qty in uv_objs.items():
+        for code, qty in pair_objs.items():
             cat = code.split("-")[0].upper()
             by_category.setdefault(cat, []).append(f"{code}: {qty}")
 
