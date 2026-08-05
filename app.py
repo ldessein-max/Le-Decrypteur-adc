@@ -262,9 +262,8 @@ def get_or_create_customer(pdf_client_name):
 # ==========================================
 def parse_pdf_file(uploaded_file):
     site_info = {"client": "", "name": "", "myid": "", "address": "", "zip": "", "city": ""}
-    g_objs_list = []
-    pair_objs = {} # Regroupe D, E, U, V, X, Y
     suivi_zones = {}
+    phase_pair_objs = {}  # Stockage par phase pour D, E, G, U, V, X, Y
     process_names = []
 
     with pdfplumber.open(uploaded_file) as pdf:
@@ -306,23 +305,24 @@ def parse_pdf_file(uploaded_file):
                 cell_zse = row[0].strip() if len(row) > 0 and row[0] else ""
                 full_row_text = " ".join([c for c in row if c])
 
-                # Détection de la Phase
-                phase_m = re.search(r"(Phase\s*\d+|ZSE\s*\d+)", cell_zse or full_row_text, re.IGNORECASE)
+                # Détection de la Phase / ZSE
+                phase_m = re.search(r"((?:[^\n]+-\s*)?(?:Phase\s*[\d\.]+|ZSE\s*[\d\.]+))", cell_zse or full_row_text, re.IGNORECASE)
                 if phase_m:
-                    current_phase = phase_m.group(1).title()
+                    current_phase = phase_m.group(1).strip()
 
                 if current_phase not in suivi_zones:
                     suivi_zones[current_phase] = {"measures": {}, "j_proc": 0}
+
+                if current_phase not in phase_pair_objs:
+                    phase_pair_objs[current_phase] = {}
 
                 # Extraction des paires Code (Quantité)
                 codes_found = re.findall(r"\b([A-Z]+(?:-[A-Z0-9]+)?)\s*\(\s*(\d+)\s*\)", full_row_text)
                 for code, qty_str in codes_found:
                     qty = int(qty_str)
                     
-                    if code.startswith("G"):
-                        g_objs_list.append({code: qty})
-                    elif any(code.startswith(letter) for letter in ["D", "E", "U", "V", "X", "Y"]):
-                        pair_objs[code] = qty
+                    if any(code.startswith(letter) for letter in ["D", "E", "G", "U", "V", "X", "Y"]):
+                        phase_pair_objs[current_phase][code] = phase_pair_objs[current_phase].get(code, 0) + qty
                     elif code == "J-PROC":
                         suivi_zones[current_phase]["j_proc"] += qty
                     else:
@@ -341,7 +341,9 @@ def parse_pdf_file(uploaded_file):
                             process_names.append(proc_clean)
 
     suivi_zones = {k: v for k, v in suivi_zones.items() if v["measures"] or v["j_proc"] > 0}
-    return site_info, g_objs_list, suivi_zones, pair_objs, process_names
+    phase_pair_objs = {k: v for k, v in phase_pair_objs.items() if v}
+
+    return site_info, phase_pair_objs, suivi_zones, process_names
 
 # ==========================================
 # 5. TRAITEMENT SYNCHROTEAM
@@ -349,7 +351,7 @@ def parse_pdf_file(uploaded_file):
 def process_single_pdf(uploaded_file, job_types_map, user_email):
     logs = []
     created_jobs_count = 0
-    site_info, g_objs_list, suivi_zones, pair_objs, process_names = parse_pdf_file(uploaded_file)
+    site_info, phase_pair_objs, suivi_zones, process_names = parse_pdf_file(uploaded_file)
     
     logs.append(f"📄 **Fichier :** `{uploaded_file.name}`")
     logs.append(f"📍 **Dossier :** `{site_info['name']}` (Réf.: `{site_info['myid']}`)")
@@ -384,11 +386,17 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
 
     interventions_to_create = []
 
-    # 1. Pose G / Dépose G
-    for g_item in g_objs_list:
-        desc_g = " / ".join([f"{k}: {v}" for k, v in g_item.items()])
-        interventions_to_create.append({"type_name": "Pose G", "description": desc_g})
-        interventions_to_create.append({"type_name": "Dépose G", "description": desc_g})
+    # 1. Traitement par Phase pour D, E, G, U, V, X, Y (Génération Pose & Dépose distinctes)
+    for phase_label, code_dict in phase_pair_objs.items():
+        by_category = {}
+        for code, qty in code_dict.items():
+            cat = code.split("-")[0].upper()
+            by_category.setdefault(cat, []).append(f"{code}: {qty}")
+
+        for cat, list_measures in by_category.items():
+            desc_cat = f"{phase_label} : " + " / ".join(list_measures)
+            interventions_to_create.append({"type_name": f"Pose {cat}", "description": desc_cat})
+            interventions_to_create.append({"type_name": f"Dépose {cat}", "description": desc_cat})
 
     # 2. Suivis 4h par Phase (Intégration N, Q, R, L + J-PROC & Intitulé Processus)
     suivi_type_label = "Suivi 4h - Enviro + opé + MES + Mat"
@@ -409,18 +417,6 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
             "type_name": suivi_type_label,
             "description": "\n".join(desc_lines)
         })
-
-    # 3. D, E, U, V, X, Y
-    if pair_objs:
-        by_category = {}
-        for code, qty in pair_objs.items():
-            cat = code.split("-")[0].upper()
-            by_category.setdefault(cat, []).append(f"{code}: {qty}")
-
-        for cat, list_measures in by_category.items():
-            desc_cat = " / ".join(list_measures)
-            interventions_to_create.append({"type_name": f"Pose {cat}", "description": desc_cat})
-            interventions_to_create.append({"type_name": f"Dépose {cat}", "description": desc_cat})
 
     for job in interventions_to_create:
         target_clean = normalize_string(job["type_name"])
