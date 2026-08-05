@@ -305,10 +305,13 @@ def parse_pdf_file(uploaded_file):
                 cell_zse = row[0].strip() if len(row) > 0 and row[0] else ""
                 full_row_text = " ".join([c for c in row if c])
 
-                # Détection de la Phase / ZSE
-                phase_m = re.search(r"((?:[^\n]+-\s*)?(?:Phase\s*[\d\.]+|ZSE\s*[\d\.]+))", cell_zse or full_row_text, re.IGNORECASE)
-                if phase_m:
-                    current_phase = phase_m.group(1).strip()
+                # Extraction robuste du libellé de Phase / ZSE (gère formats avec #, -, etc.)
+                if cell_zse:
+                    current_phase = cell_zse.strip()
+                else:
+                    phase_m = re.search(r"([^\n]+?(?:Phase|ZSE)\s*#?[\d\.]+)", full_row_text, re.IGNORECASE)
+                    if phase_m:
+                        current_phase = phase_m.group(1).strip()
 
                 if current_phase not in suivi_zones:
                     suivi_zones[current_phase] = {"measures": {}, "j_proc": 0}
@@ -386,7 +389,6 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
 
     interventions_to_create = []
 
-    # Mapping spécifique pour les libellés API non standards
     LABEL_MAPPING = {
         "D": {"pose": "Pose conditions ambiantes (D)", "depose": "Dépose conditions ambiantes (D)"},
         "E": {"pose": "Pose Mesures après sinistre (E)", "depose": "Dépose Mesures après sinistre (E)"}
