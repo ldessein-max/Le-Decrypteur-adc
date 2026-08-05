@@ -56,7 +56,7 @@ st.markdown("""
         color: white;
     }
     </style>
-""", unsafe_allow_unsafe_allow_gradient=True)
+""", unsafe_allow_html=True)
 
 # Header avec Logo / Mascot
 st.markdown("""
