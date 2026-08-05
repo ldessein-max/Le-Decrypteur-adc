@@ -258,12 +258,12 @@ def get_or_create_customer(pdf_client_name):
     return None
 
 # ==========================================
-# 4. PARSER PDF (GROUPE PAR PHASE & CAPTURE PROCESSUS)
+# 4. PARSER PDF (GROUPE PAR PHASE / ZONE PRINCIPALE & CAPTURE PROCESSUS)
 # ==========================================
 def parse_pdf_file(uploaded_file):
     site_info = {"client": "", "name": "", "myid": "", "address": "", "zip": "", "city": ""}
     suivi_zones = {}
-    phase_pair_objs = {}  # Stockage par phase pour D, E, G, U, V, X, Y
+    phase_pair_objs = {}
     process_names = []
 
     with pdfplumber.open(uploaded_file) as pdf:
@@ -305,13 +305,13 @@ def parse_pdf_file(uploaded_file):
                 cell_zse = row[0].strip() if len(row) > 0 and row[0] else ""
                 full_row_text = " ".join([c for c in row if c])
 
-                # Extraction robuste du libellé de Phase / ZSE (gère formats avec #, -, etc.)
-                if cell_zse:
+                # Extraction de la Zone/Phase principale
+                raw_zone = cell_zse.strip() if cell_zse else full_row_text
+                zone_m = re.search(r"((?:[^\n]+?-\s*)?(?:Phase\s*[\d\.]+|ZSE\s*#?[\d\.]+|Zone\s*[\d\.]+))", raw_zone, re.IGNORECASE)
+                if zone_m:
+                    current_phase = zone_m.group(1).strip()
+                elif cell_zse:
                     current_phase = cell_zse.strip()
-                else:
-                    phase_m = re.search(r"([^\n]+?(?:Phase|ZSE)\s*#?[\d\.]+)", full_row_text, re.IGNORECASE)
-                    if phase_m:
-                        current_phase = phase_m.group(1).strip()
 
                 if current_phase not in suivi_zones:
                     suivi_zones[current_phase] = {"measures": {}, "j_proc": 0}
@@ -332,14 +332,11 @@ def parse_pdf_file(uploaded_file):
                         measures = suivi_zones[current_phase]["measures"]
                         measures[code] = measures.get(code, 0) + qty
 
-                # Capture exacte des intitulés complets de Processus
-                if "PROCESSUS" in full_row_text.upper():
-                    proc_m = re.search(r"(PROCESSUS\s*N°?\s*\d+\s*:[^GJKLMNQRUVXY]+)", full_row_text, re.IGNORECASE)
-                    if proc_m:
-                        raw_proc = proc_m.group(1).strip()
-                        proc_clean = re.sub(r"\s+", " ", raw_proc)
-                        proc_clean = re.sub(r"\s+[A-Z-]+(?:\(\d+\))?.*$", "", proc_clean).strip()
-                        
+                # Capture de TOUS les intitulés de Processus (PRO / PROCESSUS)
+                if "PRO" in full_row_text.upper() or "PROCESSUS" in full_row_text.upper():
+                    proc_matches = re.findall(r"(PRO(?:CESSUS)?\s*\d+\s*-[^\n\(\)]+)", full_row_text, re.IGNORECASE)
+                    for raw_proc in proc_matches:
+                        proc_clean = re.sub(r"\s+", " ", raw_proc).strip()
                         if proc_clean and proc_clean not in process_names:
                             process_names.append(proc_clean)
 
@@ -394,7 +391,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         "E": {"pose": "Pose Mesures après sinistre (E)", "depose": "Dépose Mesures après sinistre (E)"}
     }
 
-    # 1. Traitement par Phase pour D, E, G, U, V, X, Y (Génération Pose & Dépose distinctes)
+    # 1. Traitement Pose / Dépose pour D, E, G, U, V, X, Y
     for phase_label, code_dict in phase_pair_objs.items():
         by_category = {}
         for code, qty in code_dict.items():
@@ -414,7 +411,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
             interventions_to_create.append({"type_name": pose_label, "description": desc_cat})
             interventions_to_create.append({"type_name": depose_label, "description": desc_cat})
 
-    # 2. Suivis 4h par Phase (Intégration N, Q, R, L + J-PROC & Intitulé Processus)
+    # 2. Suivis 4h avec intégration complète des mesures + tous les processus
     suivi_type_label = "Suivi 4h - Enviro + opé + MES + Mat"
 
     for phase_label, phase_data in suivi_zones.items():
