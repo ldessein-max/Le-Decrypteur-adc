@@ -165,7 +165,7 @@ def safe_post(url, json_data, retries=3, delay=2):
             res = requests.post(url, headers=HEADERS, json=json_data, timeout=15)
             if res.status_code in [200, 201]:
                 return res
-            elif res.status_code in [502, 503, 504]:
+            elif res.status_code in [502, 503, 504, 429]:
                 time.sleep(delay)
             else:
                 return res
@@ -265,7 +265,6 @@ def extract_zone_num(text):
     if not text:
         return None
     
-    # Exclure les faux positifs issus des entêtes de tableau
     if any(k in text.upper() for k in ["LISTE", "TYPE", "MESURE", "MES", "AUTRE"]):
         return None
 
@@ -310,7 +309,7 @@ def parse_pdf_file(uploaded_file):
         target_page = pdf.pages[-1]
         tables = target_page.extract_tables()
 
-        current_zone = "Zone 1"  # Valeur par défaut si rien n'est trouvé
+        current_zone = "Zone 1"
 
         for table in tables:
             for row in table:
@@ -320,7 +319,6 @@ def parse_pdf_file(uploaded_file):
                 cell_zse = row[0].strip() if len(row) > 0 and row[0] else ""
                 full_row_text = " ".join([c for c in row if c])
 
-                # Détection stricte de zone : si la ligne contient une nouvelle zone, on met à jour
                 extracted_z = extract_zone_num(cell_zse) or extract_zone_num(full_row_text)
                 if extracted_z:
                     current_zone = extracted_z
@@ -344,14 +342,13 @@ def parse_pdf_file(uploaded_file):
                         measures = suivi_zones[current_zone]["measures"]
                         measures[code] = measures.get(code, 0) + qty
 
-                # Capture unique des processus opérateur
+                # Capture des processus
                 for cell in row:
                     if cell and ("PRO" in cell.upper() or "PROCESSUS" in cell.upper()):
                         proc_clean = re.sub(r"\s+", " ", cell).strip()
                         if proc_clean and proc_clean not in process_names and not re.match(r"^J-PROC", proc_clean, re.I):
                             process_names.append(proc_clean)
 
-    # Attribution du J-PROC sur les zones
     for zone in suivi_zones:
         suivi_zones[zone]["j_proc"] = total_j_proc
 
@@ -390,7 +387,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
             "city": site_info["city"] or "Paris",
             "zipCode": site_info["zip"] or "75000",
             "country": "France",
-            "customerId": customer_id,
+            "customerId": int(customer_id),
         }
         res_site = safe_post(build_url("/site/send"), site_payload)
         if not res_site or res_site.status_code not in [200, 201]:
@@ -451,8 +448,8 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         job_type_id = job_types_map.get(target_clean)
 
         job_payload = {
-            "customerId": customer_id,
-            "siteId": site_id,
+            "customerId": int(customer_id),
+            "siteId": int(site_id),
             "description": job["description"]
         }
 
@@ -462,12 +459,16 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         else:
             logs.append(f"⚠️ `[{job['type_name']}]` non trouvé dans l'API")
 
+        # Temporisation anti-saturation API Synchroteam (500 ms)
+        time.sleep(0.5)
+
         res_job = safe_post(build_url("/job/send"), job_payload)
         if res_job and res_job.status_code in [200, 201]:
             created_jobs_count += 1
         else:
-            err_text = res_job.text if res_job else "Pas de réponse"
-            logs.append(f"❌ Erreur API pour `{job['type_name']}` : {err_text}")
+            err_text = res_job.text if res_job else "Pas de réponse (Timeout ou erreur réseau)"
+            code_text = f" Status {res_job.status_code}" if res_job else ""
+            logs.append(f"❌ Erreur API pour `{job['type_name']}`{code_text} : {err_text}")
 
     save_history_entry({
         "timestamp": datetime.now().isoformat(),
