@@ -258,19 +258,21 @@ def get_or_create_customer(pdf_client_name):
     return None
 
 # ==========================================
-# 4. PARSER PDF (RECONSTRUCTION ET FUSION PAR ZONE CANONIQUE)
+# 4. PARSER PDF (GESTION UNIVERSELLE PHASE / ZONE / ZSE)
 # ==========================================
 def extract_zone_num(text):
-    """ Extrait le numéro de zone/phase pour tout unifier sous un nom propre (ex: Zone 1) """
+    """ Extrait proprement le libellé de Phase / Zone / ZSE sans perturber la structure """
     if not text:
         return None
     
-    if any(k in text.upper() for k in ["LISTE", "TYPE", "MESURE", "MES", "AUTRE"]):
+    # Ignorer les titres de colonnes/tableaux
+    if any(k in text.upper() for k in ["LISTE DES MESURES", "DURÉE", "OBJECTIF", "TYPE", "MESURE SUR OPÉRATEUR"]):
         return None
 
-    m = re.search(r"(?:SUIVI DE CHANTIER\s*-\s*Zone|Zone|Phase|ZSE\s*#?)\s*(\d+)", text, re.IGNORECASE)
+    # Reconnaissance universelle de PHASE, ZONE ou ZSE (ex: PHASE 1, ZONE 2, ZSE#1, SUIVI DE CHANTIER - PHASE 6)
+    m = re.search(r"((?:[^\n]+?-\s*)?(?:PHASE|ZONE|ZSE)\s*#?\s*[\d\.]+)", text, re.IGNORECASE)
     if m:
-        return f"Zone {m.group(1)}"
+        return m.group(1).strip()
     return None
 
 def parse_pdf_file(uploaded_file):
@@ -309,7 +311,7 @@ def parse_pdf_file(uploaded_file):
         target_page = pdf.pages[-1]
         tables = target_page.extract_tables()
 
-        current_zone = "Zone 1"
+        current_zone = "Phase 1"
 
         for table in tables:
             for row in table:
@@ -319,12 +321,19 @@ def parse_pdf_file(uploaded_file):
                 cell_zse = row[0].strip() if len(row) > 0 and row[0] else ""
                 full_row_text = " ".join([c for c in row if c])
 
+                # Extraction dynamique de la Phase/Zone/ZSE sur la ligne
                 extracted_z = extract_zone_num(cell_zse) or extract_zone_num(full_row_text)
                 if extracted_z:
                     current_zone = extracted_z
 
-                if current_zone not in suivi_zones:
-                    suivi_zones[current_zone] = {"measures": {}, "j_proc": 0}
+                # Unification du Suivi par entité principale (ex: SUIVI DE CHANTIER - PHASE 1)
+                suivi_key = current_zone
+                suivi_match = re.search(r"((?:SUIVI DE CHANTIER\s*-\s*)?(?:PHASE|ZONE|ZSE)\s*#?\s*[\d\.]+)", current_zone, re.IGNORECASE)
+                if suivi_match:
+                    suivi_key = suivi_match.group(1).strip()
+
+                if suivi_key not in suivi_zones:
+                    suivi_zones[suivi_key] = {"measures": {}, "j_proc": 0}
 
                 if current_zone not in phase_pair_objs:
                     phase_pair_objs[current_zone] = {}
@@ -339,10 +348,10 @@ def parse_pdf_file(uploaded_file):
                     elif code == "J-PROC":
                         total_j_proc += qty
                     else:
-                        measures = suivi_zones[current_zone]["measures"]
+                        measures = suivi_zones[suivi_key]["measures"]
                         measures[code] = measures.get(code, 0) + qty
 
-                # Capture des processus
+                # Capture des processus opérateur
                 for cell in row:
                     if cell and ("PRO" in cell.upper() or "PROCESSUS" in cell.upper()):
                         proc_clean = re.sub(r"\s+", " ", cell).strip()
@@ -403,7 +412,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         "E": {"pose": "Pose Mesures après sinistre (E)", "depose": "Dépose Mesures après sinistre (E)"}
     }
 
-    # 1. Traitement Pose / Dépose
+    # 1. Traitement Pose / Dépose pour chaque Phase/Zone/ZSE détectée
     for zone_label, code_dict in phase_pair_objs.items():
         by_category = {}
         for code, qty in code_dict.items():
@@ -423,7 +432,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
             interventions_to_create.append({"type_name": pose_label, "description": desc_cat})
             interventions_to_create.append({"type_name": depose_label, "description": desc_cat})
 
-    # 2. Une SEULE intervention "Suivi 4h..." par Zone unique
+    # 2. Une intervention Suivi 4h par Phase/Zone/ZSE de suivi
     suivi_type_label = "Suivi 4h - Enviro + opé + MES + Mat"
 
     for zone_label, zone_data in suivi_zones.items():
@@ -431,7 +440,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         j_proc_qty = zone_data["j_proc"]
 
         measures_str = " / ".join([f"{k}({v})" for k, v in measures_dict.items()])
-        desc_lines = [f"SUIVI DE CHANTIER - {zone_label} : {measures_str}"]
+        desc_lines = [f"{zone_label} : {measures_str}"]
         
         if j_proc_qty > 0 or process_names:
             desc_lines.append(f"J-PROC ({j_proc_qty if j_proc_qty > 0 else 1})")
@@ -459,7 +468,6 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         else:
             logs.append(f"⚠️ `[{job['type_name']}]` non trouvé dans l'API")
 
-        # Temporisation anti-saturation API Synchroteam (500 ms)
         time.sleep(0.5)
 
         res_job = safe_post(build_url("/job/send"), job_payload)
