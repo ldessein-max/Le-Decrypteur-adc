@@ -261,15 +261,13 @@ def get_or_create_customer(pdf_client_name):
 # 4. PARSER PDF (GESTION UNIVERSELLE PHASE / ZONE / ZSE)
 # ==========================================
 def extract_zone_num(text):
-    """ Extrait proprement le libellé de Phase / Zone / ZSE sans perturber la structure """
+    """ Extrait proprement le libellé de Phase / Zone / ZSE """
     if not text:
         return None
     
-    # Ignorer les titres de colonnes/tableaux
     if any(k in text.upper() for k in ["LISTE DES MESURES", "DURÉE", "OBJECTIF", "TYPE", "MESURE SUR OPÉRATEUR"]):
         return None
 
-    # Reconnaissance universelle de PHASE, ZONE ou ZSE (ex: PHASE 1, ZONE 2, ZSE#1, SUIVI DE CHANTIER - PHASE 6)
     m = re.search(r"((?:[^\n]+?-\s*)?(?:PHASE|ZONE|ZSE)\s*#?\s*[\d\.]+)", text, re.IGNORECASE)
     if m:
         return m.group(1).strip()
@@ -321,19 +319,15 @@ def parse_pdf_file(uploaded_file):
                 cell_zse = row[0].strip() if len(row) > 0 and row[0] else ""
                 full_row_text = " ".join([c for c in row if c])
 
-                # Extraction dynamique de la Phase/Zone/ZSE sur la ligne
                 extracted_z = extract_zone_num(cell_zse) or extract_zone_num(full_row_text)
                 if extracted_z:
                     current_zone = extracted_z
 
-                # Unification du Suivi par entité principale (ex: SUIVI DE CHANTIER - PHASE 1)
+                # Identification de la zone de suivi (ex: SUIVI DE CHANTIER - PHASE 1)
                 suivi_key = current_zone
                 suivi_match = re.search(r"((?:SUIVI DE CHANTIER\s*-\s*)?(?:PHASE|ZONE|ZSE)\s*#?\s*[\d\.]+)", current_zone, re.IGNORECASE)
                 if suivi_match:
                     suivi_key = suivi_match.group(1).strip()
-
-                if suivi_key not in suivi_zones:
-                    suivi_zones[suivi_key] = {"measures": {}, "j_proc": 0}
 
                 if current_zone not in phase_pair_objs:
                     phase_pair_objs[current_zone] = {}
@@ -348,6 +342,8 @@ def parse_pdf_file(uploaded_file):
                     elif code == "J-PROC":
                         total_j_proc += qty
                     else:
+                        if suivi_key not in suivi_zones:
+                            suivi_zones[suivi_key] = {"measures": {}, "j_proc": 0}
                         measures = suivi_zones[suivi_key]["measures"]
                         measures[code] = measures.get(code, 0) + qty
 
@@ -358,10 +354,11 @@ def parse_pdf_file(uploaded_file):
                         if proc_clean and proc_clean not in process_names and not re.match(r"^J-PROC", proc_clean, re.I):
                             process_names.append(proc_clean)
 
+    # Assigner le J-PROC aux zones de suivi réelles
     for zone in suivi_zones:
         suivi_zones[zone]["j_proc"] = total_j_proc
 
-    suivi_zones = {k: v for k, v in suivi_zones.items() if v["measures"] or v["j_proc"] > 0}
+    suivi_zones = {k: v for k, v in suivi_zones.items() if v["measures"]}
     phase_pair_objs = {k: v for k, v in phase_pair_objs.items() if v}
 
     return site_info, phase_pair_objs, suivi_zones, process_names
@@ -412,7 +409,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         "E": {"pose": "Pose Mesures après sinistre (E)", "depose": "Dépose Mesures après sinistre (E)"}
     }
 
-    # 1. Traitement Pose / Dépose pour chaque Phase/Zone/ZSE détectée
+    # 1. Traitement Pose / Dépose
     for zone_label, code_dict in phase_pair_objs.items():
         by_category = {}
         for code, qty in code_dict.items():
@@ -432,7 +429,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
             interventions_to_create.append({"type_name": pose_label, "description": desc_cat})
             interventions_to_create.append({"type_name": depose_label, "description": desc_cat})
 
-    # 2. Une intervention Suivi 4h par Phase/Zone/ZSE de suivi
+    # 2. Intervention Suivi 4h
     suivi_type_label = "Suivi 4h - Enviro + opé + MES + Mat"
 
     for zone_label, zone_data in suivi_zones.items():
