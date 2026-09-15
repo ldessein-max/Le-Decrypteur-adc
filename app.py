@@ -258,10 +258,10 @@ def get_or_create_customer(pdf_client_name):
     return None
 
 # ==========================================
-# 4. PARSER PDF (GESTION UNIVERSELLE PHASE / ZONE / ZSE)
+# 4. PARSER PDF & REGROUPEMENT CANONIQUE
 # ==========================================
 def extract_zone_num(text):
-    """ Extrait proprement le libellé de Phase / Zone / ZSE """
+    """ Extrait le libellé brut de Phase / Zone / ZSE """
     if not text:
         return None
     
@@ -272,6 +272,24 @@ def extract_zone_num(text):
     if m:
         return m.group(1).strip()
     return None
+
+def clean_suivi_zone_name(raw_text):
+    """
+    Isole le nom canonique pour le Suivi de Chantier (ex: SUIVI DE CHANTIER - ZONE 1)
+    en coupant tout sous-intitulé qui suit (Locaux adjacents, Air extérieur, etc.)
+    """
+    if not raw_text:
+        return "SUIVI DE CHANTIER - Zone 1"
+    
+    # Recherche un motif du type : SUIVI DE CHANTIER - ZONE 1 / PHASE 1 / ZSE 1
+    m = re.search(r"((?:SUIVI DE CHANTIER\s*-\s*)?(?:ZONE|PHASE|ZSE)\s*#?\s*\d+)", raw_text, re.IGNORECASE)
+    if m:
+        title = m.group(1).strip()
+        # Uniformise le préfixe si absent
+        if not title.upper().startswith("SUIVI DE CHANTIER"):
+            title = f"SUIVI DE CHANTIER - {title}"
+        return title.upper()
+    return "SUIVI DE CHANTIER - ZONE 1"
 
 def parse_pdf_file(uploaded_file):
     site_info = {"client": "", "name": "", "myid": "", "address": "", "zip": "", "city": ""}
@@ -323,11 +341,8 @@ def parse_pdf_file(uploaded_file):
                 if extracted_z:
                     current_zone = extracted_z
 
-                # Identification de la zone de suivi (ex: SUIVI DE CHANTIER - PHASE 1)
-                suivi_key = current_zone
-                suivi_match = re.search(r"((?:SUIVI DE CHANTIER\s*-\s*)?(?:PHASE|ZONE|ZSE)\s*#?\s*[\d\.]+)", current_zone, re.IGNORECASE)
-                if suivi_match:
-                    suivi_key = suivi_match.group(1).strip()
+                # Clé unique stricte pour le suivi (ex: SUIVI DE CHANTIER - ZONE 1)
+                suivi_key = clean_suivi_zone_name(current_zone)
 
                 if current_zone not in phase_pair_objs:
                     phase_pair_objs[current_zone] = {}
@@ -354,7 +369,7 @@ def parse_pdf_file(uploaded_file):
                         if proc_clean and proc_clean not in process_names and not re.match(r"^J-PROC", proc_clean, re.I):
                             process_names.append(proc_clean)
 
-    # Assigner le J-PROC aux zones de suivi réelles
+    # Attribution de J-PROC aux zones de suivi réelles
     for zone in suivi_zones:
         suivi_zones[zone]["j_proc"] = total_j_proc
 
@@ -429,7 +444,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
             interventions_to_create.append({"type_name": pose_label, "description": desc_cat})
             interventions_to_create.append({"type_name": depose_label, "description": desc_cat})
 
-    # 2. Intervention Suivi 4h
+    # 2. Intervention Suivi 4h (1 seule par Zone canonique)
     suivi_type_label = "Suivi 4h - Enviro + opé + MES + Mat"
 
     for zone_label, zone_data in suivi_zones.items():
