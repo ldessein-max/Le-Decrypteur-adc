@@ -281,11 +281,9 @@ def clean_suivi_zone_name(raw_text):
     if not raw_text:
         return "SUIVI DE CHANTIER - Zone 1"
     
-    # Recherche un motif du type : SUIVI DE CHANTIER - ZONE 1 / PHASE 1 / ZSE 1
     m = re.search(r"((?:SUIVI DE CHANTIER\s*-\s*)?(?:ZONE|PHASE|ZSE)\s*#?\s*\d+)", raw_text, re.IGNORECASE)
     if m:
         title = m.group(1).strip()
-        # Uniformise le préfixe si absent
         if not title.upper().startswith("SUIVI DE CHANTIER"):
             title = f"SUIVI DE CHANTIER - {title}"
         return title.upper()
@@ -299,6 +297,7 @@ def parse_pdf_file(uploaded_file):
     total_j_proc = 0
 
     with pdfplumber.open(uploaded_file) as pdf:
+        # 1. Extraction du texte complet sur TOUTES les pages pour les métadonnées
         full_text = "".join([(page.extract_text() or "") + "\n" for page in pdf.pages])
 
         client_m = re.search(r"CLIENT\s*:\s*(.+)", full_text, re.IGNORECASE)
@@ -310,22 +309,56 @@ def parse_pdf_file(uploaded_file):
             site_info["name"] = dossier_m.group(1).strip()
             site_info["myid"] = dossier_m.group(2).strip()
 
-        adresse_m = re.search(r"ADRESSE D'INTERVENTION\s*:\s*(.+)", full_text, re.IGNORECASE)
+        # Extraction multi-lignes robuste de l'ADRESSE D'INTERVENTION
+        adresse_m = re.search(r"ADRESSE D'INTERVENTION\s*:\s*([\s\S]+?)(?=\n\n|\n[A-Z\s]{4,}:|BON DE COMMANDE|$)", full_text, re.IGNORECASE)
         if adresse_m:
-            raw_addr = adresse_m.group(1).strip()
-            site_info["address"] = raw_addr
-            cp_ville_m = re.search(r"(\d{5})\s+(.+)", raw_addr)
+            raw_addr_block = adresse_m.group(1).strip()
+            # Unifier les saut de lignes de l'adresse en espaces propres
+            clean_addr_full = re.sub(r"\s+", " ", raw_addr_block).strip()
+            
+            # Recherche du code postal (5 chiffres) et de la ville (texte qui suit, même sur ligne suivante)
+            cp_ville_m = re.search(r"(\d{5})\s+(.+)", clean_addr_full)
             if cp_ville_m:
                 site_info["zip"] = cp_ville_m.group(1)
                 site_info["city"] = cp_ville_m.group(2).strip()
+                # Extraire la voie (tout ce qui précède le code postal)
+                street_m = re.search(r"^(.*?)\s*\d{5}", clean_addr_full)
+                site_info["address"] = street_m.group(1).strip() if street_m and street_m.group(1).strip() else clean_addr_full
+            else:
+                site_info["address"] = clean_addr_full
 
         if not site_info["client"]: 
             site_info["client"] = "CLIENT INCONNU"
         if not site_info["name"]: 
             site_info["name"] = uploaded_file.name.split(".")[0]
 
-        target_page = pdf.pages[-1]
-        tables = target_page.extract_tables()
+        # 2. Localisation précise du Bon de Commande (Bannière "BON DE COMMANDE - STRATEGIE")
+        bdc_start_page_idx = -1
+        for idx, page in enumerate(pdf.pages):
+            p_text = page.extract_text() or ""
+            if "BON DE COMMANDE" in p_text.upper():
+                bdc_start_page_idx = idx
+
+        if bdc_start_page_idx != -1:
+            target_pages = pdf.pages[bdc_start_page_idx:bdc_start_page_idx + 2]
+        else:
+            target_pages = pdf.pages[-2:] if len(pdf.pages) >= 2 else pdf.pages
+
+        tables = []
+        bdc_started = False
+
+        for p in target_pages:
+            p_tables = p.extract_tables()
+            if not p_tables:
+                continue
+
+            for t in p_tables:
+                t_str = " ".join([" ".join([str(c) for c in r if c]) for r in t])
+                if "BON DE COMMANDE" in t_str.upper() or "LISTE DES MESURES" in t_str.upper():
+                    bdc_started = True
+
+                if bdc_started or bdc_start_page_idx != -1:
+                    tables.append(t)
 
         current_zone = "Phase 1"
 
@@ -337,11 +370,13 @@ def parse_pdf_file(uploaded_file):
                 cell_zse = row[0].strip() if len(row) > 0 and row[0] else ""
                 full_row_text = " ".join([c for c in row if c])
 
+                if "BON DE COMMANDE" in full_row_text.upper():
+                    continue
+
                 extracted_z = extract_zone_num(cell_zse) or extract_zone_num(full_row_text)
                 if extracted_z:
                     current_zone = extracted_z
 
-                # Clé unique stricte pour le suivi (ex: SUIVI DE CHANTIER - ZONE 1)
                 suivi_key = clean_suivi_zone_name(current_zone)
 
                 if current_zone not in phase_pair_objs:
@@ -388,6 +423,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
     
     logs.append(f"📄 **Fichier :** `{uploaded_file.name}`")
     logs.append(f"📍 **Dossier :** `{site_info['name']}` (Réf.: `{site_info['myid']}`)")
+    logs.append(f"🏠 **Adresse capturée :** `{site_info['address']}` | `{site_info['zip']}` `{site_info['city']}`")
 
     site_id, customer_id = find_existing_site_by_myid(site_info["myid"])
     site_existed = False
