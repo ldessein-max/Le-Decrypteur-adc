@@ -94,7 +94,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. AUTHENTIFICATION (EXÉCUTÉE EN PREMIER)
+# 2. AUTHENTIFICATION (EXECUTION EN PREMIER)
 # ==========================================
 def check_auth():
     if "authenticated" not in st.session_state:
@@ -133,10 +133,15 @@ if not check_auth():
     st.stop()
 
 # ==========================================
-# 3. SYNCHROTEAM & HISTORIQUE (APRES AUTH)
+# 3. SYNCHROTEAM & HISTORIQUE
 # ==========================================
-SYNCHROTEAM_DOMAIN = st.secrets.get("SYNCHROTEAM_DOMAIN", "")
-SYNCHROTEAM_API_KEY = st.secrets.get("SYNCHROTEAM_API_KEY", "")
+try:
+    SYNCHROTEAM_DOMAIN = st.secrets["SYNCHROTEAM_DOMAIN"]
+    SYNCHROTEAM_API_KEY = st.secrets["SYNCHROTEAM_API_KEY"]
+except Exception:
+    SYNCHROTEAM_DOMAIN = ""
+    SYNCHROTEAM_API_KEY = ""
+
 BASE_URL = "https://ws.synchroteam.com/api/v3"
 HISTORY_FILE = "import_history.json"
 
@@ -193,6 +198,9 @@ def save_history_entry(entry):
 @st.cache_data(ttl=3600)
 def fetch_job_types_map():
     job_types_map = {}
+    if not SYNCHROTEAM_DOMAIN or not SYNCHROTEAM_API_KEY:
+        return job_types_map
+
     page = 1
     page_size = 50
     
@@ -499,7 +507,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
 
         if job_type_id:
             job_payload["type"] = {"id": int(job_type_id)}
-            logs.append(f"⚙ `[{job['type_name']}]` -> ID : `{job_type_id}`")
+            logs.append(f"⚙️ `[{job['type_name']}]` -> ID : `{job_type_id}`")
         else:
             logs.append(f"⚠️ `[{job['type_name']}]` non trouvé dans l'API")
 
@@ -558,7 +566,7 @@ job_types_map = fetch_job_types_map()
 
 col1, col2 = st.columns(2)
 with col1: 
-    st.metric("Statut API", "Connecté", delta=f"{len(job_types_map)} types")
+    st.metric("Statut API", "Connecté" if SYNCHROTEAM_DOMAIN else "Configuration requise", delta=f"{len(job_types_map)} types")
 with col2: 
     st.metric("Dossiers (48h)", len(load_history()))
 
