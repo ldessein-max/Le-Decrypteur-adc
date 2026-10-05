@@ -105,7 +105,7 @@ def check_auth():
         with col2:
             st.markdown('<div class="login-card">', unsafe_allow_html=True)
             try:
-                st.image("ACD_WEB_RVB.png", use_container_width=True)
+                st.image("ACD_WEB_RVB.png", width='stretch')
             except Exception:
                 st.markdown('<div class="main-title"><span class="highlight-letter">L</span>e <span class="highlight-letter">D</span>écrypteur - ADC</div>', unsafe_allow_html=True)
             
@@ -114,7 +114,7 @@ def check_auth():
 
             with st.form("auth_form"):
                 email_input = st.text_input("Saisissez votre e-mail professionnel :", placeholder=f"exemple@{ALLOWED_DOMAIN}")
-                submit_button = st.form_submit_button("Se connecter 🚀", type="primary", use_container_width=True)
+                submit_button = st.form_submit_button("Se connecter 🚀", type="primary", width='stretch')
 
                 if submit_button:
                     clean_email = email_input.strip().lower()
@@ -136,8 +136,8 @@ if not check_auth():
 # 3. SYNCHROTEAM & HISTORIQUE
 # ==========================================
 try:
-    SYNCHROTEAM_DOMAIN = st.secrets["SYNCHROTEAM_DOMAIN"]
-    SYNCHROTEAM_API_KEY = st.secrets["SYNCHROTEAM_API_KEY"]
+    SYNCHROTEAM_DOMAIN = st.secrets["SYNCHROTEAM_DOMAIN"].strip()
+    SYNCHROTEAM_API_KEY = st.secrets["SYNCHROTEAM_API_KEY"].strip()
 except Exception:
     SYNCHROTEAM_DOMAIN = ""
     SYNCHROTEAM_API_KEY = ""
@@ -145,12 +145,21 @@ except Exception:
 BASE_URL = "https://ws.synchroteam.com/api/v3"
 HISTORY_FILE = "import_history.json"
 
-# Correction du format d'authentification Synchroteam API v3 (Clé_API:)
-auth_str = f"{SYNCHROTEAM_API_KEY}:"
+# Construction de l'authentification Basic Auth Synchroteam
+auth_str = f"{SYNCHROTEAM_DOMAIN}:{SYNCHROTEAM_API_KEY}"
 b64_auth = base64.b64encode(auth_str.encode()).decode()
 
 HEADERS = {
     "Authorization": f"Basic {b64_auth}",
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+}
+
+# Header de fallback si le domaine est géré directement par le serveur
+auth_str_alt = f"{SYNCHROTEAM_API_KEY}:"
+b64_auth_alt = base64.b64encode(auth_str_alt.encode()).decode()
+HEADERS_ALT = {
+    "Authorization": f"Basic {b64_auth_alt}",
     "Content-Type": "application/json",
     "Accept": "application/json",
 }
@@ -163,15 +172,38 @@ def normalize_string(text):
     return text.strip().upper()
 
 def build_url(endpoint):
-    return f"{BASE_URL}{endpoint}"
+    sep = "&" if "?" in endpoint else "?"
+    return f"{BASE_URL}{endpoint}{sep}domain={SYNCHROTEAM_DOMAIN}"
 
-def safe_post(url, json_data, retries=3, delay=2):
+def safe_get(endpoint):
+    url = build_url(endpoint)
+    # Essai 1 : Authorization domain:api_key
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        if res.status_code == 200:
+            return res
+    except Exception:
+        pass
+    # Essai 2 : Authorization api_key:
+    try:
+        res = requests.get(url, headers=HEADERS_ALT, timeout=10)
+        if res.status_code == 200:
+            return res
+    except Exception:
+        pass
+    return res
+
+def safe_post(endpoint, json_data, retries=2, delay=1):
+    url = build_url(endpoint)
     for attempt in range(retries):
         try:
             res = requests.post(url, headers=HEADERS, json=json_data, timeout=15)
             if res.status_code in [200, 201]:
                 return res
-            elif res.status_code in [502, 503, 504, 429]:
+            res_alt = requests.post(url, headers=HEADERS_ALT, json=json_data, timeout=15)
+            if res_alt.status_code in [200, 201]:
+                return res_alt
+            if res.status_code in [502, 503, 504, 429]:
                 time.sleep(delay)
             else:
                 return res
@@ -206,32 +238,28 @@ def fetch_job_types_map():
     page_size = 50
     
     while page <= 10:
-        url = build_url(f"/jobType/list?page={page}&pageSize={page_size}")
-        try:
-            res = requests.get(url, headers=HEADERS, timeout=8)
-            if res.status_code == 200:
-                data = res.json()
-                records = data.get("data", []) if isinstance(data, dict) else data
-                if not records:
-                    break
-                for item in records:
-                    if isinstance(item, dict) and "name" in item and "id" in item:
-                        clean_key = normalize_string(item["name"])
-                        job_types_map[clean_key] = item["id"]
-                if len(records) < page_size:
-                    break
-                page += 1
-            else:
+        res = safe_get(f"/jobType/list?page={page}&pageSize={page_size}")
+        if res and res.status_code == 200:
+            data = res.json()
+            records = data.get("data", []) if isinstance(data, dict) else data
+            if not records:
                 break
-        except Exception:
+            for item in records:
+                if isinstance(item, dict) and "name" in item and "id" in item:
+                    clean_key = normalize_string(item["name"])
+                    job_types_map[clean_key] = item["id"]
+            if len(records) < page_size:
+                break
+            page += 1
+        else:
             break
 
     return job_types_map
 
 def find_existing_site_by_myid(myid):
     try:
-        res = requests.get(build_url(f"/site/list?myId={requests.utils.quote(myid)}"), headers=HEADERS, timeout=10)
-        if res.status_code == 200:
+        res = safe_get(f"/site/list?myId={requests.utils.quote(myid)}")
+        if res and res.status_code == 200:
             data = res.json()
             sites = data.get("data", []) if isinstance(data, dict) else data
             for site in sites:
@@ -245,7 +273,6 @@ def get_or_create_customer(pdf_client_name):
     clean_client_name = pdf_client_name.strip()
     norm_target = normalize_string(clean_client_name)
     
-    # 1. Recherche du client dans Synchroteam
     endpoints_to_try = [
         f"/customer/list?name={requests.utils.quote(clean_client_name)}",
         "/customer/list?pageSize=100"
@@ -253,23 +280,23 @@ def get_or_create_customer(pdf_client_name):
     
     for endpoint in endpoints_to_try:
         try:
-            res_search = requests.get(build_url(endpoint), headers=HEADERS, timeout=10)
-            if res_search.status_code == 200:
+            res_search = safe_get(endpoint)
+            if res_search and res_search.status_code == 200:
                 data = res_search.json()
                 clients = data.get("data", []) if isinstance(data, dict) else data
                 
-                # Correspondance exacte ou partielle
                 for c in clients:
                     c_name_norm = normalize_string(c.get("name", ""))
                     if norm_target in c_name_norm or c_name_norm in norm_target:
                         st.info(f"💡 Client rattaché : {c.get('name')} (ID: {c.get('id')})")
                         return c.get("id")
             else:
-                st.warning(f"⚠️ Recherche API client : Code {res_search.status_code} - {res_search.text}")
+                code_str = res_search.status_code if res_search else "Pas de réponse"
+                text_str = res_search.text if res_search else ""
+                st.warning(f"⚠️ Recherche API client : Code {code_str} - {text_str}")
         except Exception as e:
             st.error(f"Erreur réseau recherche client : {e}")
 
-    # 2. Création uniquement si le client n'existe pas du tout
     clean_myid = "CLI-" + re.sub(r"[^A-Za-z0-9]", "", clean_client_name).upper()[:6] + str(int(time.time()))[-4:]
     payload = {
         "name": clean_client_name,
@@ -280,7 +307,7 @@ def get_or_create_customer(pdf_client_name):
         "country": "France"
     }
     
-    res_create = safe_post(build_url("/customer/send"), payload)
+    res_create = safe_post("/customer/send", payload)
     if res_create:
         if res_create.status_code in [200, 201]:
             return res_create.json().get("id")
@@ -334,19 +361,16 @@ def parse_pdf_file(uploaded_file):
             if t:
                 full_text += t + "\n"
 
-        # 1. CLIENT : Arrêt strict au retour à la ligne pour isoler uniquement le nom
         client_m = re.search(r"CLIENT\s*:\s*([^\n\r]+)", full_text, re.IGNORECASE)
         if client_m: 
             raw_client = client_m.group(1).strip()
             site_info["client"] = re.split(r"[\(-]", raw_client)[0].strip()
 
-        # 2. DOSSIER & RÉFÉRENCE
         dossier_m = re.search(r"DOSSIER\s*N°\s*:\s*([^\n(]+)\s*\(([^)]+)\)", full_text, re.IGNORECASE)
         if dossier_m:
             site_info["name"] = dossier_m.group(1).strip()
             site_info["myid"] = dossier_m.group(2).strip()
 
-        # 3. ADRESSE D'INTERVENTION
         adresse_m = re.search(r"ADRESSE D'INTERVENTION\s*:\s*([\s\S]+?)(?=\n\n|\n[A-Z\s]{4,}:|BON DE COMMANDE|$)", full_text, re.IGNORECASE)
         if adresse_m:
             raw_addr_block = adresse_m.group(1).strip()
@@ -473,7 +497,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
             "country": "France",
             "customerId": int(customer_id),
         }
-        res_site = safe_post(build_url("/site/send"), site_payload)
+        res_site = safe_post("/site/send", site_payload)
         if not res_site or res_site.status_code not in [200, 201]:
             return False, "Échec lors de la création du site.", logs, 0
 
@@ -543,7 +567,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
 
         time.sleep(0.5)
 
-        res_job = safe_post(build_url("/job/send"), job_payload)
+        res_job = safe_post("/job/send", job_payload)
         if res_job and res_job.status_code in [200, 201]:
             created_jobs_count += 1
         else:
@@ -569,7 +593,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
 # ==========================================
 with st.sidebar:
     try:
-        st.image("ACD_WEB_RVB.png", use_container_width=True)
+        st.image("ACD_WEB_RVB.png", width='stretch')
     except Exception:
         pass
     st.write("---")
@@ -585,7 +609,7 @@ with header_col1:
     st.caption("Importation et création automatique d'interventions Synchroteam")
 with header_col2:
     try:
-        st.image("ACD_WEB_RVB.png", use_container_width=True)
+        st.image("ACD_WEB_RVB.png", width='stretch')
     except Exception:
         st.caption("[Logo ADC Labo]")
     st.markdown('<div class="hippo-badge">🦛</div>', unsafe_allow_html=True)
@@ -606,7 +630,7 @@ tab_import, tab_history = st.tabs(["🚀 Import", "📜 Historique"])
 
 with tab_import:
     uploaded_files = st.file_uploader("Fichiers PDF", type=["pdf"], accept_multiple_files=True)
-    if uploaded_files and st.button(f"Lancer ({len(uploaded_files)})", type="primary", use_container_width=True):
+    if uploaded_files and st.button(f"Lancer ({len(uploaded_files)})", type="primary", width='stretch'):
         for file in uploaded_files:
             with st.expander(f"Traitement : {file.name}", expanded=True):
                 ok, msg, logs, _ = process_single_pdf(file, job_types_map, st.session_state.user_email)
