@@ -145,7 +145,8 @@ except Exception:
 BASE_URL = "https://ws.synchroteam.com/api/v3"
 HISTORY_FILE = "import_history.json"
 
-auth_str = f"{SYNCHROTEAM_DOMAIN}:{SYNCHROTEAM_API_KEY}"
+# Correction du format d'authentification Synchroteam API v3 (Clé_API:)
+auth_str = f"{SYNCHROTEAM_API_KEY}:"
 b64_auth = base64.b64encode(auth_str.encode()).decode()
 
 HEADERS = {
@@ -244,7 +245,7 @@ def get_or_create_customer(pdf_client_name):
     clean_client_name = pdf_client_name.strip()
     norm_target = normalize_string(clean_client_name)
     
-    # 1. Recherche tolérante dans Synchroteam
+    # 1. Recherche du client dans Synchroteam
     endpoints_to_try = [
         f"/customer/list?name={requests.utils.quote(clean_client_name)}",
         "/customer/list?pageSize=100"
@@ -268,7 +269,7 @@ def get_or_create_customer(pdf_client_name):
         except Exception as e:
             st.error(f"Erreur réseau recherche client : {e}")
 
-    # 2. Création uniquement si le client n'existe pas
+    # 2. Création uniquement si le client n'existe pas du tout
     clean_myid = "CLI-" + re.sub(r"[^A-Za-z0-9]", "", clean_client_name).upper()[:6] + str(int(time.time()))[-4:]
     payload = {
         "name": clean_client_name,
@@ -333,7 +334,7 @@ def parse_pdf_file(uploaded_file):
             if t:
                 full_text += t + "\n"
 
-        # 1. CLIENT : Arrêt strict à la fin de la ligne pour ne capturer que "AD2L"
+        # 1. CLIENT : Arrêt strict au retour à la ligne pour isoler uniquement le nom
         client_m = re.search(r"CLIENT\s*:\s*([^\n\r]+)", full_text, re.IGNORECASE)
         if client_m: 
             raw_client = client_m.group(1).strip()
