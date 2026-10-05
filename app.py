@@ -241,20 +241,21 @@ def find_existing_site_by_myid(myid):
     return None, None
 
 def get_or_create_customer(pdf_client_name):
+    clean_client_name = pdf_client_name.strip()
     try:
-        res_search = requests.get(build_url(f"/customer/list?name={requests.utils.quote(pdf_client_name)}"), headers=HEADERS, timeout=10)
+        res_search = requests.get(build_url(f"/customer/list?name={requests.utils.quote(clean_client_name)}"), headers=HEADERS, timeout=10)
         if res_search.status_code == 200:
             data = res_search.json()
             clients = data.get("data", []) if isinstance(data, dict) else data
             for c in clients:
-                if normalize_string(c.get("name", "")) == normalize_string(pdf_client_name):
+                if normalize_string(c.get("name", "")) == normalize_string(clean_client_name):
                     return c.get("id")
     except Exception:
         pass
 
-    clean_myid = re.sub(r"[^A-Za-z0-9]", "", pdf_client_name).upper()[:20]
+    clean_myid = "CLI-" + re.sub(r"[^A-Za-z0-9]", "", clean_client_name).upper()[:10]
     payload = {
-        "name": pdf_client_name,
+        "name": clean_client_name,
         "myId": clean_myid,
         "address": "À renseigner",
         "city": "Paris",
@@ -309,16 +310,19 @@ def parse_pdf_file(uploaded_file):
             if t:
                 full_text += t + "\n"
 
-        # MODIFICATION ICI : arrêt au retour à la ligne pour ne pas déborder sur DOSSIER N°
-        client_m = re.search(r"CLIENT\s*:\s*([^\n]+)", full_text, re.IGNORECASE)
+        # 1. CLIENT : Arrêt strict à la fin de la ligne pour ne capturer que "AD2L"
+        client_m = re.search(r"CLIENT\s*:\s*([^\n\r]+)", full_text, re.IGNORECASE)
         if client_m: 
-            site_info["client"] = client_m.group(1).strip()
+            raw_client = client_m.group(1).strip()
+            site_info["client"] = re.split(r"[\(-]", raw_client)[0].strip()
 
+        # 2. DOSSIER & RÉFÉRENCE
         dossier_m = re.search(r"DOSSIER\s*N°\s*:\s*([^\n(]+)\s*\(([^)]+)\)", full_text, re.IGNORECASE)
         if dossier_m:
             site_info["name"] = dossier_m.group(1).strip()
             site_info["myid"] = dossier_m.group(2).strip()
 
+        # 3. ADRESSE D'INTERVENTION
         adresse_m = re.search(r"ADRESSE D'INTERVENTION\s*:\s*([\s\S]+?)(?=\n\n|\n[A-Z\s]{4,}:|BON DE COMMANDE|$)", full_text, re.IGNORECASE)
         if adresse_m:
             raw_addr_block = adresse_m.group(1).strip()
@@ -420,6 +424,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
     site_info, phase_pair_objs, suivi_zones, process_names = parse_pdf_file(uploaded_file)
     
     logs.append(f"📄 **Fichier :** `{uploaded_file.name}`")
+    logs.append(f"🏢 **Client capturé :** `{site_info['client']}`")
     logs.append(f"📍 **Dossier :** `{site_info['name']}` (Réf.: `{site_info['myid']}`)")
     logs.append(f"🏠 **Adresse capturée :** `{site_info['address']}` | `{site_info['zip']}` `{site_info['city']}`")
 
