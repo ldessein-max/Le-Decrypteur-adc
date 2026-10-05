@@ -1,324 +1,160 @@
-import base64
-import json
 import os
 import re
-import time
 import unicodedata
-from datetime import datetime, timedelta
-import pdfplumber
 import requests
+import pdfplumber
 import streamlit as st
 
 # ==========================================
-# 1. CONFIGURATION STREAMLIT & STYLES (ADC)
+# CONFIGURATION & PAGE SETUP
 # ==========================================
 st.set_page_config(
     page_title="Le Décrypteur ADC",
-    page_icon="🦛",
+    page_icon="🔍",
     layout="wide"
 )
 
-ALLOWED_DOMAIN = "adc-labo.fr"
+# Récupération des secrets
+DOMAIN = st.secrets.get("SYNCHROTEAM_DOMAIN", "")
+API_KEY = st.secrets.get("SYNCHROTEAM_API_KEY", "")
 
-st.markdown("""
-    <style>
-        .stApp { 
-            background-color: #F8F9FA; 
-        }
-        .main-title {
-            font-size: 2.4rem;
-            font-weight: 700;
-            color: #004B87;
-            margin-bottom: 0px;
-            line-height: 1.2;
-        }
-        .highlight-letter {
-            color: #8DB600;
-            font-weight: 900;
-        }
-        .hippo-badge {
-            font-size: 2.2rem;
-            text-align: center;
-            margin-top: -5px;
-        }
-        div[data-testid="metric-container"] {
-            background-color: #FFFFFF;
-            padding: 15px 20px;
-            border-radius: 12px;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
-            border-left: 5px solid #8DB600;
-            border-top: 1px solid #E2E8F0;
-            border-right: 1px solid #E2E8F0;
-            border-bottom: 1px solid #E2E8F0;
-        }
-        .stTabs [data-baseweb="tab-list"] { gap: 10px; }
-        .stTabs [data-baseweb="tab"] {
-            background-color: #E2E8F0;
-            border-radius: 8px 8px 0 0;
-            padding: 10px 20px;
-            color: #004B87;
-            font-weight: 600;
-        }
-        .stTabs [aria-selected="true"] {
-            background-color: #004B87 !important;
-            color: #FFFFFF !important;
-        }
-        section[data-testid="stFileUploadDropzone"] {
-            background-color: #FFFFFF;
-            border: 2px dashed #004B87;
-            border-radius: 12px;
-        }
-        .stButton>button {
-            background-color: #004B87 !important;
-            color: white !important;
-            border-radius: 8px !important;
-            border: none !important;
-            padding: 0.6rem 1.2rem !important;
-            font-weight: 600 !important;
-            transition: all 0.3s ease !important;
-            width: 100%;
-        }
-        .stButton>button:hover {
-            background-color: #8DB600 !important;
-            color: white !important;
-        }
-        .login-card {
-            background-color: #FFFFFF;
-            padding: 2.5rem;
-            border-radius: 16px;
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.08);
-            border-top: 6px solid #004B87;
-            text-align: center;
-        }
-    </style>
-""", unsafe_allow_html=True)
+# Authentification minimale pour l'application
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
 
-# ==========================================
-# 2. AUTHENTIFICATION (EXECUTION EN PREMIER)
-# ==========================================
-def check_auth():
-    if "authenticated" not in st.session_state:
-        st.session_state.authenticated = False
+def login():
+    st.sidebar.title("Connexion")
+    password = st.sidebar.text_input("Mot de passe", type="password")
+    if st.sidebar.button("Se connecter"):
+        if password == "adc2024":  # À personnaliser si besoin
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.sidebar.error("Mot de passe incorrect")
 
-    if not st.session_state.authenticated:
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
-            st.markdown('<div class="login-card">', unsafe_allow_html=True)
-            try:
-                st.image("ACD_WEB_RVB.png", use_container_width=True)
-            except Exception:
-                st.markdown('<div class="main-title"><span class="highlight-letter">L</span>e <span class="highlight-letter">D</span>écrypteur - ADC</div>', unsafe_allow_html=True)
-            
-            st.caption("Connexion requise pour accéder à la plateforme")
-            st.write("---")
-
-            with st.form("auth_form"):
-                email_input = st.text_input("Saisissez votre e-mail professionnel :", placeholder=f"exemple@{ALLOWED_DOMAIN}")
-                submit_button = st.form_submit_button("Se connecter 🚀", type="primary", use_container_width=True)
-
-                if submit_button:
-                    clean_email = email_input.strip().lower()
-                    if clean_email.endswith(f"@{ALLOWED_DOMAIN.lower()}"):
-                        st.session_state.authenticated = True
-                        st.session_state.user_email = clean_email
-                        st.rerun()
-                    else:
-                        st.error(f"Accès refusé. Seules les adresses e-mail finissant par @{ALLOWED_DOMAIN} sont autorisées.")
-            
-            st.markdown('</div>', unsafe_allow_html=True)
-        return False
-    return True
-
-if not check_auth():
+if not st.session_state["authenticated"]:
+    login()
     st.stop()
 
 # ==========================================
-# 3. SYNCHROTEAM & HISTORIQUE
+# FONCTIONS API SYNCHROTEAM
 # ==========================================
-try:
-    SYNCHROTEAM_DOMAIN = st.secrets["SYNCHROTEAM_DOMAIN"]
-    SYNCHROTEAM_API_KEY = st.secrets["SYNCHROTEAM_API_KEY"]
-except Exception:
-    SYNCHROTEAM_DOMAIN = ""
-    SYNCHROTEAM_API_KEY = ""
-
-BASE_URL = "https://ws.synchroteam.com/api/v3"
-HISTORY_FILE = "import_history.json"
-
-auth_str = f"{SYNCHROTEAM_DOMAIN}:{SYNCHROTEAM_API_KEY}"
-b64_auth = base64.b64encode(auth_str.encode()).decode()
-
 HEADERS = {
-    "Authorization": f"Basic {b64_auth}",
-    "Content-Type": "application/json",
-    "Accept": "application/json",
+    "Authorization": f"Basic {API_KEY}",
+    "Content-Type": "application/json"
 }
 
-def normalize_string(text):
-    if not text:
-        return ""
-    text = unicodedata.normalize('NFKC', str(text))
-    text = re.sub(r"[\s\xa0\u200b\u202f]+", " ", text)
-    return text.strip().upper()
-
 def build_url(endpoint):
-    return f"{BASE_URL}{endpoint}"
+    return f"https://{DOMAIN}.synchroteam.com/api/v3{endpoint}"
 
-def safe_post(url, json_data, retries=3, delay=2):
-    for attempt in range(retries):
-        try:
-            res = requests.post(url, headers=HEADERS, json=json_data, timeout=15)
-            if res.status_code in [200, 201]:
-                return res
-            elif res.status_code in [502, 503, 504, 429]:
-                time.sleep(delay)
-            else:
-                return res
-        except requests.exceptions.RequestException:
-            time.sleep(delay)
-    return None
+def normalize_string(s):
+    if not s:
+        return ""
+    s = unicodedata.normalize('NFD', s).encode('ascii', 'ignore').decode("utf-8")
+    return re.sub(r'[^a-zA-Z0-9]', '', s).lower()
 
-def load_history():
-    if not os.path.exists(HISTORY_FILE):
-        return []
+def safe_post(url, payload):
     try:
-        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        cutoff = datetime.now() - timedelta(days=2)
-        return [item for item in data if datetime.fromisoformat(item["timestamp"]) >= cutoff]
-    except Exception:
-        return []
-
-def save_history_entry(entry):
-    history = load_history()
-    history.insert(0, entry)
-    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(history, f, ensure_ascii=False, indent=2)
-
-@st.cache_data(ttl=3600)
-def fetch_job_types_map():
-    job_types_map = {}
-    if not SYNCHROTEAM_DOMAIN or not SYNCHROTEAM_API_KEY:
-        return job_types_map
-
-    page = 1
-    page_size = 50
-    
-    while page <= 10:
-        url = build_url(f"/jobType/list?page={page}&pageSize={page_size}")
-        try:
-            res = requests.get(url, headers=HEADERS, timeout=8)
-            if res.status_code == 200:
-                data = res.json()
-                records = data.get("data", []) if isinstance(data, dict) else data
-                if not records:
-                    break
-                for item in records:
-                    if isinstance(item, dict) and "name" in item and "id" in item:
-                        clean_key = normalize_string(item["name"])
-                        job_types_map[clean_key] = item["id"]
-                if len(records) < page_size:
-                    break
-                page += 1
-            else:
-                break
-        except Exception:
-            break
-
-    return job_types_map
-
-def find_existing_site_by_myid(myid):
-    try:
-        res = requests.get(build_url(f"/site/list?myId={requests.utils.quote(myid)}"), headers=HEADERS, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            sites = data.get("data", []) if isinstance(data, dict) else data
-            for site in sites:
-                if normalize_string(site.get("myId", "")) == normalize_string(myid):
-                    return site.get("id"), site.get("customerId")
-    except Exception:
-        pass
-    return None, None
+        response = requests.post(url, json=payload, headers=HEADERS, timeout=15)
+        return response
+    except Exception as e:
+        st.error(f"Erreur réseau API : {e}")
+        return None
 
 def get_or_create_customer(pdf_client_name):
+    clean_client_name = pdf_client_name.strip()
+    
+    # 1. Recherche par nom
     try:
-        res_search = requests.get(build_url(f"/customer/list?name={requests.utils.quote(pdf_client_name)}"), headers=HEADERS, timeout=10)
+        res_search = requests.get(
+            build_url(f"/customer/list?name={requests.utils.quote(clean_client_name)}"),
+            headers=HEADERS,
+            timeout=10
+        )
         if res_search.status_code == 200:
             data = res_search.json()
             clients = data.get("data", []) if isinstance(data, dict) else data
             for c in clients:
-                if normalize_string(c.get("name", "")) == normalize_string(pdf_client_name):
+                if normalize_string(c.get("name", "")) == normalize_string(clean_client_name):
+                    return c.get("id")
+                if normalize_string(clean_client_name) in normalize_string(c.get("name", "")):
                     return c.get("id")
     except Exception:
         pass
 
-    clean_myid = re.sub(r"[^A-Za-z0-9]", "", pdf_client_name).upper()[:20]
+    # 2. Création si absent
+    clean_myid = "CLI-" + re.sub(r"[^A-Za-z0-9]", "", clean_client_name).upper()[:10]
     payload = {
-        "name": pdf_client_name,
+        "name": clean_client_name,
         "myId": clean_myid,
         "address": "À renseigner",
         "city": "Paris",
         "zipCode": "75000",
         "country": "France"
     }
+    
     res_create = safe_post(build_url("/customer/send"), payload)
     if res_create and res_create.status_code in [200, 201]:
         return res_create.json().get("id")
     return None
 
-# ==========================================
-# 4. PARSER PDF & REGROUPEMENT CANONIQUE
-# ==========================================
-def extract_zone_num(text):
-    if not text:
-        return None
-    
-    if any(k in text.upper() for k in ["LISTE DES MESURES", "DURÉE", "OBJECTIF", "TYPE", "MESURE SUR OPÉRATEUR"]):
-        return None
-
-    m = re.search(r"((?:[^\n]+?-\s*)?(?:PHASE|ZONE|ZSE)\s*#?\s*[\d\.]+)", text, re.IGNORECASE)
-    if m:
-        return m.group(1).strip()
+def create_site_in_synchroteam(customer_id, site_info):
+    payload = {
+        "customerId": customer_id,
+        "name": site_info.get("name", "Nouveau Site"),
+        "myId": site_info.get("myid", ""),
+        "address": site_info.get("address", ""),
+        "zipCode": site_info.get("zip", ""),
+        "city": site_info.get("city", ""),
+        "country": "France"
+    }
+    res = safe_post(build_url("/site/send"), payload)
+    if res and res.status_code in [200, 201]:
+        return res.json().get("id")
     return None
 
-def clean_suivi_zone_name(raw_text):
-    if not raw_text:
-        return "SUIVI DE CHANTIER - ZONE 1"
-    
-    m = re.search(r"((?:SUIVI DE CHANTIER\s*-\s*)?(?:ZONE|PHASE|ZSE)\s*#?\s*\d+)", raw_text, re.IGNORECASE)
-    if m:
-        title = m.group(1).strip()
-        if not title.upper().startswith("SUIVI DE CHANTIER"):
-            title = f"SUIVI DE CHANTIER - {title}"
-        return title.upper()
-    return "SUIVI DE CHANTIER - ZONE 1"
-
+# ==========================================
+# PARSER PDF DU BON DE COMMANDE
+# ==========================================
 def parse_pdf_file(uploaded_file):
-    site_info = {"client": "", "name": "", "myid": "", "address": "", "zip": "", "city": ""}
-    suivi_zones = {}
-    phase_pair_objs = {}
-    process_names = []
-    total_j_proc = 0
-
+    site_info = {
+        "client": "",
+        "name": "",
+        "myid": "",
+        "address": "",
+        "zip": "",
+        "city": "",
+        "measures": []
+    }
+    
     with pdfplumber.open(uploaded_file) as pdf:
-        total_pages = len(pdf.pages)
-        
         full_text = ""
-        for p in pdf.pages:
-            t = p.extract_text()
+        for page in pdf.pages:
+            t = page.extract_text()
             if t:
                 full_text += t + "\n"
 
-        client_m = re.search(r"CLIENT\s*:\s*(.+)", full_text, re.IGNORECASE)
-        if client_m: 
+        # 1. Extraction Client (Arrêt strict au retour à la ligne)
+        client_m = re.search(r"CLIENT\s*:\s*([^\n]+)", full_text, re.IGNORECASE)
+        if client_m:
             site_info["client"] = client_m.group(1).strip()
 
+        # 2. Extraction Dossier et Référence
         dossier_m = re.search(r"DOSSIER\s*N°\s*:\s*([^\n(]+)\s*\(([^)]+)\)", full_text, re.IGNORECASE)
         if dossier_m:
             site_info["name"] = dossier_m.group(1).strip()
             site_info["myid"] = dossier_m.group(2).strip()
+        else:
+            simple_dossier = re.search(r"DOSSIER\s*N°\s*:\s*([^\n]+)", full_text, re.IGNORECASE)
+            if simple_dossier:
+                site_info["name"] = simple_dossier.group(1).strip()
 
-        adresse_m = re.search(r"ADRESSE D'INTERVENTION\s*:\s*([\s\S]+?)(?=\n\n|\n[A-Z\s]{4,}:|BON DE COMMANDE|$)", full_text, re.IGNORECASE)
+        # 3. Extraction Adresse d'intervention multi-lignes
+        adresse_m = re.search(
+            r"ADRESSE D'INTERVENTION\s*:\s*([\s\S]+?)(?=\n\n|\n[A-Z\s]{4,}:|BON DE COMMANDE|$)",
+            full_text,
+            re.IGNORECASE
+        )
         if adresse_m:
             raw_addr_block = adresse_m.group(1).strip()
             clean_addr_full = re.sub(r"\s+", " ", raw_addr_block).strip()
@@ -332,272 +168,45 @@ def parse_pdf_file(uploaded_file):
             else:
                 site_info["address"] = clean_addr_full
 
-        if not site_info["client"]: 
-            site_info["client"] = "CLIENT INCONNU"
-        if not site_info["name"]: 
-            site_info["name"] = uploaded_file.name.split(".")[0]
+        # 4. Extraction de la section "Bon de Commande" pour les prestations
+        bdc_marker = re.search(r"BON DE COMMANDE", full_text, re.IGNORECASE)
+        if bdc_marker:
+            bdc_text = full_text[bdc_marker.start():]
+            for line in bdc_text.split("\n"):
+                if re.search(r"\b(Prélèvement|Mesurage|Analyse|Diagnostic|Comptage)\b", line, re.IGNORECASE):
+                    site_info["measures"].append(line.strip())
 
-        bdc_start_idx = -1
-        for idx in range(total_pages - 1, -1, -1):
-            p_text = pdf.pages[idx].extract_text() or ""
-            if "BON DE COMMANDE" in p_text.upper():
-                bdc_start_idx = idx
-                break
-
-        if bdc_start_idx != -1:
-            target_pages = pdf.pages[bdc_start_idx:min(bdc_start_idx + 2, total_pages)]
-        else:
-            target_pages = pdf.pages[-2:] if total_pages >= 2 else pdf.pages
-
-        tables = []
-        for p in target_pages:
-            p_tables = p.extract_tables()
-            if not p_tables:
-                continue
-
-            for t in p_tables:
-                t_str = " ".join([" ".join([str(c) for c in r if c]) for r in t])
-                if any(kw in t_str.upper() for kw in ["BON DE COMMANDE", "LISTE DES MESURES", "DURÉE", "OBJECTIF"]):
-                    tables.append(t)
-
-        current_zone = "Phase 1"
-
-        for table in tables:
-            for row in table:
-                if not row or not any(row):
-                    continue
-                
-                cell_zse = row[0].strip() if len(row) > 0 and row[0] else ""
-                full_row_text = " ".join([str(c) for c in row if c])
-
-                if "BON DE COMMANDE" in full_row_text.upper():
-                    continue
-
-                extracted_z = extract_zone_num(cell_zse) or extract_zone_num(full_row_text)
-                if extracted_z:
-                    current_zone = extracted_z
-
-                suivi_key = clean_suivi_zone_name(current_zone)
-
-                if current_zone not in phase_pair_objs:
-                    phase_pair_objs[current_zone] = {}
-
-                codes_found = re.findall(r"\b([A-Z]+(?:-[A-Z0-9]+)?)\s*\(\s*(\d+)\s*\)", full_row_text)
-                for code, qty_str in codes_found:
-                    qty = int(qty_str)
-                    
-                    if any(code.startswith(letter) for letter in ["D", "E", "G", "U", "V", "X", "Y"]):
-                        phase_pair_objs[current_zone][code] = phase_pair_objs[current_zone].get(code, 0) + qty
-                    elif code == "J-PROC":
-                        total_j_proc += qty
-                    else:
-                        if suivi_key not in suivi_zones:
-                            suivi_zones[suivi_key] = {"measures": {}, "j_proc": 0}
-                        measures = suivi_zones[suivi_key]["measures"]
-                        measures[code] = measures.get(code, 0) + qty
-
-                for cell in row:
-                    if cell and ("PRO" in str(cell).upper() or "PROCESSUS" in str(cell).upper()):
-                        proc_clean = re.sub(r"\s+", " ", str(cell)).strip()
-                        if proc_clean and proc_clean not in process_names and not re.match(r"^J-PROC", proc_clean, re.I):
-                            process_names.append(proc_clean)
-
-    for zone in suivi_zones:
-        suivi_zones[zone]["j_proc"] = total_j_proc
-
-    suivi_zones = {k: v for k, v in suivi_zones.items() if v["measures"]}
-    phase_pair_objs = {k: v for k, v in phase_pair_objs.items() if v}
-
-    return site_info, phase_pair_objs, suivi_zones, process_names
+    return site_info
 
 # ==========================================
-# 5. TRAITEMENT SYNCHROTEAM
+# INTERFACE STREAMLIT
 # ==========================================
-def process_single_pdf(uploaded_file, job_types_map, user_email):
-    logs = []
-    created_jobs_count = 0
-    site_info, phase_pair_objs, suivi_zones, process_names = parse_pdf_file(uploaded_file)
-    
-    logs.append(f"📄 **Fichier :** `{uploaded_file.name}`")
-    logs.append(f"📍 **Dossier :** `{site_info['name']}` (Réf.: `{site_info['myid']}`)")
-    logs.append(f"🏠 **Adresse capturée :** `{site_info['address']}` | `{site_info['zip']}` `{site_info['city']}`")
+st.title("📄 Le Décrypteur ADC")
 
-    site_id, customer_id = find_existing_site_by_myid(site_info["myid"])
-    site_existed = False
-
-    if site_id and customer_id:
-        site_existed = True
-        logs.append(f"🔗 **Site existant trouvé** (ID: `{site_id}`). Rattachement...")
-    else:
-        logs.append("🔍 Création du site...")
-        customer_id = get_or_create_customer(site_info["client"])
-        if not customer_id:
-            return False, "Échec lors de la création/récupération du client.", logs, 0
-
-        site_payload = {
-            "name": site_info["name"],
-            "myId": site_info["myid"],
-            "address": site_info["address"] or "À renseigner",
-            "city": site_info["city"] or "Paris",
-            "zipCode": site_info["zip"] or "75000",
-            "country": "France",
-            "customerId": int(customer_id),
-        }
-        res_site = safe_post(build_url("/site/send"), site_payload)
-        if not res_site or res_site.status_code not in [200, 201]:
-            return False, "Échec lors de la création du site.", logs, 0
-
-        site_id = res_site.json().get("id")
-        logs.append(f"✅ Site créé (ID: `{site_id}`)")
-
-    interventions_to_create = []
-
-    LABEL_MAPPING = {
-        "D": {"pose": "Pose conditions ambiantes (D)", "depose": "Dépose conditions ambiantes (D)"},
-        "E": {"pose": "Pose Mesures après sinistre (E)", "depose": "Dépose Mesures après sinistre (E)"}
-    }
-
-    for zone_label, code_dict in phase_pair_objs.items():
-        by_category = {}
-        for code, qty in code_dict.items():
-            cat = code.split("-")[0].upper()
-            by_category.setdefault(cat, []).append(f"{code}: {qty}")
-
-        for cat, list_measures in by_category.items():
-            desc_cat = f"{zone_label} : " + " / ".join(list_measures)
-            
-            if cat in LABEL_MAPPING:
-                pose_label = LABEL_MAPPING[cat]["pose"]
-                depose_label = LABEL_MAPPING[cat]["depose"]
-            else:
-                pose_label = f"Pose {cat}"
-                depose_label = f"Dépose {cat}"
-
-            interventions_to_create.append({"type_name": pose_label, "description": desc_cat})
-            interventions_to_create.append({"type_name": depose_label, "description": desc_cat})
-
-    suivi_type_label = "Suivi 4h - Enviro + opé + MES + Mat"
-
-    for zone_label, zone_data in suivi_zones.items():
-        measures_dict = zone_data["measures"]
-        j_proc_qty = zone_data["j_proc"]
-
-        measures_str = " / ".join([f"{k}({v})" for k, v in measures_dict.items()])
-        desc_lines = [f"{zone_label} : {measures_str}"]
-        
-        if j_proc_qty > 0 or process_names:
-            desc_lines.append(f"J-PROC ({j_proc_qty if j_proc_qty > 0 else 1})")
-            for proc in process_names:
-                desc_lines.append(proc)
-
-        interventions_to_create.append({
-            "type_name": suivi_type_label,
-            "description": "\n".join(desc_lines)
-        })
-
-    for job in interventions_to_create:
-        target_clean = normalize_string(job["type_name"])
-        job_type_id = job_types_map.get(target_clean)
-
-        job_payload = {
-            "customerId": int(customer_id),
-            "siteId": int(site_id),
-            "description": job["description"]
-        }
-
-        if job_type_id:
-            job_payload["type"] = {"id": int(job_type_id)}
-            logs.append(f"⚙️ `[{job['type_name']}]` -> ID : `{job_type_id}`")
-        else:
-            logs.append(f"⚠️ `[{job['type_name']}]` non trouvé dans l'API")
-
-        time.sleep(0.5)
-
-        res_job = safe_post(build_url("/job/send"), job_payload)
-        if res_job and res_job.status_code in [200, 201]:
-            created_jobs_count += 1
-        else:
-            err_text = res_job.text if res_job else "Pas de réponse (Timeout ou erreur réseau)"
-            code_text = f" Status {res_job.status_code}" if res_job else ""
-            logs.append(f"❌ Erreur API pour `{job['type_name']}`{code_text} : {err_text}")
-
-    save_history_entry({
-        "timestamp": datetime.now().isoformat(),
-        "date_str": datetime.now().strftime("%d/%m/%Y %H:%M"),
-        "user_email": user_email,
-        "filename": uploaded_file.name,
-        "client": site_info["client"],
-        "site": site_info["name"],
-        "jobs_count": created_jobs_count,
-        "attached_to_existing": site_existed
-    })
-
-    return True, f"Dossier **{site_info['name']}** traité avec succès !", logs, created_jobs_count
-
-# ==========================================
-# 6. INTERFACE UTILISATEUR
-# ==========================================
-with st.sidebar:
-    try:
-        st.image("ACD_WEB_RVB.png", use_container_width=True)
-    except Exception:
-        pass
-    st.write("---")
-    st.markdown(f"👤 **Utilisateur :**\n`{st.session_state.user_email}`")
-    st.write("---")
-    if st.button("Se déconnecter"):
-        st.session_state.authenticated = False
-        st.rerun()
-
-header_col1, header_col2 = st.columns([3, 1])
-with header_col1:
-    st.markdown('<div class="main-title"><span class="highlight-letter">L</span>e <span class="highlight-letter">D</span>écrypteur - ADC</div>', unsafe_allow_html=True)
-    st.caption("Importation et création automatique d'interventions Synchroteam")
-with header_col2:
-    try:
-        st.image("ACD_WEB_RVB.png", use_container_width=True)
-    except Exception:
-        st.caption("[Logo ADC Labo]")
-    st.markdown('<div class="hippo-badge">🦛</div>', unsafe_allow_html=True)
-
-st.write("---")
-
-job_types_map = fetch_job_types_map()
-
-col1, col2 = st.columns(2)
-with col1: 
-    st.metric("Statut API", "Connecté" if SYNCHROTEAM_DOMAIN else "Configuration requise", delta=f"{len(job_types_map)} types")
-with col2: 
-    st.metric("Dossiers (48h)", len(load_history()))
-
-st.write("---")
-
-tab_import, tab_history = st.tabs(["🚀 Import", "📜 Historique"])
+tab_import, tab_history = st.tabs(["🚀 Importation", "📜 Historique"])
 
 with tab_import:
     uploaded_files = st.file_uploader("Fichiers PDF", type=["pdf"], accept_multiple_files=True)
-    if uploaded_files and st.button(f"Lancer ({len(uploaded_files)})", type="primary", use_container_width=True):
+    
+    if uploaded_files and st.button(f"Lancer ({len(uploaded_files)})"):
         for file in uploaded_files:
-            with st.expander(f"Traitement : {file.name}", expanded=True):
-                ok, msg, logs, _ = process_single_pdf(file, job_types_map, st.session_state.user_email)
-                for log in logs: 
-                    st.markdown(log)
-                if ok: 
-                    st.success(msg)
-                else: 
-                    st.error(msg)
-
-with tab_history:
-    history_data = load_history()
-    if not history_data:
-        st.info("Aucun historique disponible sur les dernières 48 heures.")
-    else:
-        for entry in history_data:
-            user_info = entry.get("user_email", "Utilisateur inconnu")
-            st.write(
-                f"📅 **{entry['date_str']}** | "
-                f"👤 **{user_info}** | "
-                f"🏢 **{entry['client']}** | "
-                f"📍 {entry['site']}"
-            )
-            st.divider()
+            st.write(f"---")
+            info = parse_pdf_file(file)
+            
+            st.write(f"📄 **Fichier :** `{file.name}`")
+            st.write(f"🏢 **Client capturé :** `{info['client']}`")
+            st.write(f"📍 **Dossier :** `{info['name']}` (Réf: `{info['myid']}`)")
+            st.write(f"🏠 **Adresse :** {info['address']} | {info['zip']} {info['city']}")
+            
+            if info["client"]:
+                customer_id = get_or_create_customer(info["client"])
+                if customer_id:
+                    site_id = create_site_in_synchroteam(customer_id, info)
+                    if site_id:
+                        st.success(f"Site créé avec succès dans Synchroteam (ID: {site_id}) !")
+                    else:
+                        st.error("Échec lors de la création du site.")
+                else:
+                    st.error("Échec lors de la création/récupération du client.")
+            else:
+                st.warning("Aucun nom de client capturé dans le document.")
