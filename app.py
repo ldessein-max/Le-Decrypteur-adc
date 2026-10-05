@@ -94,7 +94,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 2. AUTHENTIFICATION
+# 2. AUTHENTIFICATION (EXÉCUTÉE EN PREMIER)
 # ==========================================
 def check_auth():
     if "authenticated" not in st.session_state:
@@ -133,10 +133,10 @@ if not check_auth():
     st.stop()
 
 # ==========================================
-# 3. SYNCHROTEAM & HISTORIQUE
+# 3. SYNCHROTEAM & HISTORIQUE (APRES AUTH)
 # ==========================================
-SYNCHROTEAM_DOMAIN = st.secrets["SYNCHROTEAM_DOMAIN"]
-SYNCHROTEAM_API_KEY = st.secrets["SYNCHROTEAM_API_KEY"]
+SYNCHROTEAM_DOMAIN = st.secrets.get("SYNCHROTEAM_DOMAIN", "")
+SYNCHROTEAM_API_KEY = st.secrets.get("SYNCHROTEAM_API_KEY", "")
 BASE_URL = "https://ws.synchroteam.com/api/v3"
 HISTORY_FILE = "import_history.json"
 
@@ -190,15 +190,16 @@ def save_history_entry(entry):
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
 
+@st.cache_data(ttl=3600)
 def fetch_job_types_map():
     job_types_map = {}
     page = 1
     page_size = 50
     
-    while True:
+    while page <= 10:
         url = build_url(f"/jobType/list?page={page}&pageSize={page_size}")
         try:
-            res = requests.get(url, headers=HEADERS, timeout=10)
+            res = requests.get(url, headers=HEADERS, timeout=8)
             if res.status_code == 200:
                 data = res.json()
                 records = data.get("data", []) if isinstance(data, dict) else data
@@ -261,7 +262,6 @@ def get_or_create_customer(pdf_client_name):
 # 4. PARSER PDF & REGROUPEMENT CANONIQUE
 # ==========================================
 def extract_zone_num(text):
-    """ Extrait le libellé brut de Phase / Zone / ZSE """
     if not text:
         return None
     
@@ -274,12 +274,8 @@ def extract_zone_num(text):
     return None
 
 def clean_suivi_zone_name(raw_text):
-    """
-    Isole le nom canonique pour le Suivi de Chantier (ex: SUIVI DE CHANTIER - ZONE 1)
-    en coupant tout sous-intitulé qui suit (Locaux adjacents, Air extérieur, etc.)
-    """
     if not raw_text:
-        return "SUIVI DE CHANTIER - Zone 1"
+        return "SUIVI DE CHANTIER - ZONE 1"
     
     m = re.search(r"((?:SUIVI DE CHANTIER\s*-\s*)?(?:ZONE|PHASE|ZSE)\s*#?\s*\d+)", raw_text, re.IGNORECASE)
     if m:
@@ -297,8 +293,13 @@ def parse_pdf_file(uploaded_file):
     total_j_proc = 0
 
     with pdfplumber.open(uploaded_file) as pdf:
-        # 1. Extraction du texte complet sur TOUTES les pages pour les métadonnées
-        full_text = "".join([(page.extract_text() or "") + "\n" for page in pdf.pages])
+        total_pages = len(pdf.pages)
+        
+        full_text = ""
+        for p in pdf.pages:
+            t = p.extract_text()
+            if t:
+                full_text += t + "\n"
 
         client_m = re.search(r"CLIENT\s*:\s*(.+)", full_text, re.IGNORECASE)
         if client_m: 
@@ -309,19 +310,15 @@ def parse_pdf_file(uploaded_file):
             site_info["name"] = dossier_m.group(1).strip()
             site_info["myid"] = dossier_m.group(2).strip()
 
-        # Extraction multi-lignes robuste de l'ADRESSE D'INTERVENTION
         adresse_m = re.search(r"ADRESSE D'INTERVENTION\s*:\s*([\s\S]+?)(?=\n\n|\n[A-Z\s]{4,}:|BON DE COMMANDE|$)", full_text, re.IGNORECASE)
         if adresse_m:
             raw_addr_block = adresse_m.group(1).strip()
-            # Unifier les saut de lignes de l'adresse en espaces propres
             clean_addr_full = re.sub(r"\s+", " ", raw_addr_block).strip()
             
-            # Recherche du code postal (5 chiffres) et de la ville (texte qui suit, même sur ligne suivante)
             cp_ville_m = re.search(r"(\d{5})\s+(.+)", clean_addr_full)
             if cp_ville_m:
                 site_info["zip"] = cp_ville_m.group(1)
                 site_info["city"] = cp_ville_m.group(2).strip()
-                # Extraire la voie (tout ce qui précède le code postal)
                 street_m = re.search(r"^(.*?)\s*\d{5}", clean_addr_full)
                 site_info["address"] = street_m.group(1).strip() if street_m and street_m.group(1).strip() else clean_addr_full
             else:
@@ -332,21 +329,19 @@ def parse_pdf_file(uploaded_file):
         if not site_info["name"]: 
             site_info["name"] = uploaded_file.name.split(".")[0]
 
-        # 2. Localisation précise du Bon de Commande (Bannière "BON DE COMMANDE - STRATEGIE")
-        bdc_start_page_idx = -1
-        for idx, page in enumerate(pdf.pages):
-            p_text = page.extract_text() or ""
+        bdc_start_idx = -1
+        for idx in range(total_pages - 1, -1, -1):
+            p_text = pdf.pages[idx].extract_text() or ""
             if "BON DE COMMANDE" in p_text.upper():
-                bdc_start_page_idx = idx
+                bdc_start_idx = idx
+                break
 
-        if bdc_start_page_idx != -1:
-            target_pages = pdf.pages[bdc_start_page_idx:bdc_start_page_idx + 2]
+        if bdc_start_idx != -1:
+            target_pages = pdf.pages[bdc_start_idx:min(bdc_start_idx + 2, total_pages)]
         else:
-            target_pages = pdf.pages[-2:] if len(pdf.pages) >= 2 else pdf.pages
+            target_pages = pdf.pages[-2:] if total_pages >= 2 else pdf.pages
 
         tables = []
-        bdc_started = False
-
         for p in target_pages:
             p_tables = p.extract_tables()
             if not p_tables:
@@ -354,10 +349,7 @@ def parse_pdf_file(uploaded_file):
 
             for t in p_tables:
                 t_str = " ".join([" ".join([str(c) for c in r if c]) for r in t])
-                if "BON DE COMMANDE" in t_str.upper() or "LISTE DES MESURES" in t_str.upper():
-                    bdc_started = True
-
-                if bdc_started or bdc_start_page_idx != -1:
+                if any(kw in t_str.upper() for kw in ["BON DE COMMANDE", "LISTE DES MESURES", "DURÉE", "OBJECTIF"]):
                     tables.append(t)
 
         current_zone = "Phase 1"
@@ -368,7 +360,7 @@ def parse_pdf_file(uploaded_file):
                     continue
                 
                 cell_zse = row[0].strip() if len(row) > 0 and row[0] else ""
-                full_row_text = " ".join([c for c in row if c])
+                full_row_text = " ".join([str(c) for c in row if c])
 
                 if "BON DE COMMANDE" in full_row_text.upper():
                     continue
@@ -382,7 +374,6 @@ def parse_pdf_file(uploaded_file):
                 if current_zone not in phase_pair_objs:
                     phase_pair_objs[current_zone] = {}
 
-                # Extraction des paires Code (Quantité)
                 codes_found = re.findall(r"\b([A-Z]+(?:-[A-Z0-9]+)?)\s*\(\s*(\d+)\s*\)", full_row_text)
                 for code, qty_str in codes_found:
                     qty = int(qty_str)
@@ -397,14 +388,12 @@ def parse_pdf_file(uploaded_file):
                         measures = suivi_zones[suivi_key]["measures"]
                         measures[code] = measures.get(code, 0) + qty
 
-                # Capture des processus opérateur
                 for cell in row:
-                    if cell and ("PRO" in cell.upper() or "PROCESSUS" in cell.upper()):
-                        proc_clean = re.sub(r"\s+", " ", cell).strip()
+                    if cell and ("PRO" in str(cell).upper() or "PROCESSUS" in str(cell).upper()):
+                        proc_clean = re.sub(r"\s+", " ", str(cell)).strip()
                         if proc_clean and proc_clean not in process_names and not re.match(r"^J-PROC", proc_clean, re.I):
                             process_names.append(proc_clean)
 
-    # Attribution de J-PROC aux zones de suivi réelles
     for zone in suivi_zones:
         suivi_zones[zone]["j_proc"] = total_j_proc
 
@@ -460,7 +449,6 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         "E": {"pose": "Pose Mesures après sinistre (E)", "depose": "Dépose Mesures après sinistre (E)"}
     }
 
-    # 1. Traitement Pose / Dépose
     for zone_label, code_dict in phase_pair_objs.items():
         by_category = {}
         for code, qty in code_dict.items():
@@ -480,7 +468,6 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
             interventions_to_create.append({"type_name": pose_label, "description": desc_cat})
             interventions_to_create.append({"type_name": depose_label, "description": desc_cat})
 
-    # 2. Intervention Suivi 4h (1 seule par Zone canonique)
     suivi_type_label = "Suivi 4h - Enviro + opé + MES + Mat"
 
     for zone_label, zone_data in suivi_zones.items():
@@ -512,7 +499,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
 
         if job_type_id:
             job_payload["type"] = {"id": int(job_type_id)}
-            logs.append(f"⚙️ `[{job['type_name']}]` -> ID : `{job_type_id}`")
+            logs.append(f"⚙ `[{job['type_name']}]` -> ID : `{job_type_id}`")
         else:
             logs.append(f"⚠️ `[{job['type_name']}]` non trouvé dans l'API")
 
