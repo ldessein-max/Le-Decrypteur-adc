@@ -242,18 +242,37 @@ def find_existing_site_by_myid(myid):
 
 def get_or_create_customer(pdf_client_name):
     clean_client_name = pdf_client_name.strip()
-    try:
-        res_search = requests.get(build_url(f"/customer/list?name={requests.utils.quote(clean_client_name)}"), headers=HEADERS, timeout=10)
-        if res_search.status_code == 200:
-            data = res_search.json()
-            clients = data.get("data", []) if isinstance(data, dict) else data
-            for c in clients:
-                if normalize_string(c.get("name", "")) == normalize_string(clean_client_name):
-                    return c.get("id")
-    except Exception:
-        pass
+    norm_target = normalize_string(clean_client_name)
+    
+    # 1. Recherche tolérante dans Synchroteam
+    endpoints_to_try = [
+        f"/customer/list?name={requests.utils.quote(clean_client_name)}",
+        "/customer/list?pageSize=100"
+    ]
+    
+    for endpoint in endpoints_to_try:
+        try:
+            res_search = requests.get(build_url(endpoint), headers=HEADERS, timeout=10)
+            if res_search.status_code == 200:
+                data = res_search.json()
+                clients = data.get("data", []) if isinstance(data, dict) else data
+                
+                # Correspondance exacte
+                for c in clients:
+                    c_name_norm = normalize_string(c.get("name", ""))
+                    if c_name_norm == norm_target:
+                        return c.get("id")
+                
+                # Correspondance partielle (ex: "AD2L" dans "AD2L SARL" ou "AD2L FRANCE")
+                for c in clients:
+                    c_name_norm = normalize_string(c.get("name", ""))
+                    if norm_target in c_name_norm or c_name_norm in norm_target:
+                        return c.get("id")
+        except Exception:
+            pass
 
-    clean_myid = "CLI-" + re.sub(r"[^A-Za-z0-9]", "", clean_client_name).upper()[:10]
+    # 2. Création uniquement si le client n'existe absolument pas
+    clean_myid = "CLI-" + re.sub(r"[^A-Za-z0-9]", "", clean_client_name).upper()[:6] + str(int(time.time()))[-4:]
     payload = {
         "name": clean_client_name,
         "myId": clean_myid,
@@ -262,9 +281,11 @@ def get_or_create_customer(pdf_client_name):
         "zipCode": "75000",
         "country": "France"
     }
+    
     res_create = safe_post(build_url("/customer/send"), payload)
     if res_create and res_create.status_code in [200, 201]:
         return res_create.json().get("id")
+        
     return None
 
 # ==========================================
@@ -435,7 +456,7 @@ def process_single_pdf(uploaded_file, job_types_map, user_email):
         site_existed = True
         logs.append(f"🔗 **Site existant trouvé** (ID: `{site_id}`). Rattachement...")
     else:
-        logs.append("🔍 Création du site...")
+        logs.append("🔍 Recherche / Création du client...")
         customer_id = get_or_create_customer(site_info["client"])
         if not customer_id:
             return False, "Échec lors de la création/récupération du client.", logs, 0
