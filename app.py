@@ -257,21 +257,18 @@ def get_or_create_customer(pdf_client_name):
                 data = res_search.json()
                 clients = data.get("data", []) if isinstance(data, dict) else data
                 
-                # Correspondance exacte
-                for c in clients:
-                    c_name_norm = normalize_string(c.get("name", ""))
-                    if c_name_norm == norm_target:
-                        return c.get("id")
-                
-                # Correspondance partielle (ex: "AD2L" dans "AD2L SARL" ou "AD2L FRANCE")
+                # Correspondance exacte ou partielle
                 for c in clients:
                     c_name_norm = normalize_string(c.get("name", ""))
                     if norm_target in c_name_norm or c_name_norm in norm_target:
+                        st.info(f"💡 Client rattaché : {c.get('name')} (ID: {c.get('id')})")
                         return c.get("id")
-        except Exception:
-            pass
+            else:
+                st.warning(f"⚠️ Recherche API client : Code {res_search.status_code} - {res_search.text}")
+        except Exception as e:
+            st.error(f"Erreur réseau recherche client : {e}")
 
-    # 2. Création uniquement si le client n'existe absolument pas
+    # 2. Création uniquement si le client n'existe pas
     clean_myid = "CLI-" + re.sub(r"[^A-Za-z0-9]", "", clean_client_name).upper()[:6] + str(int(time.time()))[-4:]
     payload = {
         "name": clean_client_name,
@@ -283,8 +280,13 @@ def get_or_create_customer(pdf_client_name):
     }
     
     res_create = safe_post(build_url("/customer/send"), payload)
-    if res_create and res_create.status_code in [200, 201]:
-        return res_create.json().get("id")
+    if res_create:
+        if res_create.status_code in [200, 201]:
+            return res_create.json().get("id")
+        else:
+            st.error(f"❌ Erreur API Création Client Synchroteam ({res_create.status_code}) : {res_create.text}")
+    else:
+        st.error("❌ Pas de réponse du serveur Synchroteam (Timeout ou Secret manquant)")
         
     return None
 
