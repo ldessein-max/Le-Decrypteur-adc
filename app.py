@@ -323,7 +323,7 @@ def extract_zone_num(text):
         return None
     
     upper_t = text.upper()
-    if any(k in upper_t for k in ["LISTE DES MESURES", "DURÉE", "OBJECTIF", "TYPE", "MESURE SUR OPÉRATEUR", "DATE / HEURE"]):
+    if any(k in upper_t for k in ["LISTE DES MESURES", "DURÉE", "OBJECTIF", "MESURE SUR OPÉRATEUR", "DATE / HEURE"]):
         return None
 
     # Normalisation OCR fréquente (ex: Phase IA -> Phase 1A, Phase IB -> Phase 1B)
@@ -331,7 +331,7 @@ def extract_zone_num(text):
     cleaned = re.sub(r"\s*#\s*ZSE[A-Z0-9]*", "", cleaned, flags=re.IGNORECASE).strip()
 
     # Capture ex: "ETATS INITIAUX - Zone 1 Phase 1A", "FIN DE CHANTIER - Zone 1 Phase 1A", "SUIVI DE CHANTIER - Zone 1 Phase 1A"
-    m = re.search(r"((?:[^\n-]+?-\s*)?(?:ZONE|PHASE)\s*\d+(?:\s*Phase\s*[A-Z0-9]+)?)", cleaned, re.IGNORECASE)
+    m = re.search(r"((?:[A-ZÀ-ÿ\s]+-\s*)?(?:ZONE|PHASE)\s*\d+(?:\s*Phase\s*[A-Z0-9]+)?)", cleaned, re.IGNORECASE)
     if m:
         return re.sub(r"\s+", " ", m.group(1)).strip()
     return None
@@ -356,13 +356,7 @@ def parse_pdf_file(uploaded_file):
 
     with pdfplumber.open(uploaded_file) as pdf:
         total_pages = len(pdf.pages)
-        
         first_page_text = pdf.pages[0].extract_text() or ""
-        full_text = ""
-        for p in pdf.pages:
-            t = p.extract_text()
-            if t:
-                full_text += t + "\n"
 
         # 1. CLIENT : arrêt strict avant DOSSIER N°, ADRESSE ou fin de ligne
         client_m = re.search(r"CLIENT\s*:\s*(.+?)(?=\s+DOSSIER\s*N°|\s+ADRESSE\s*D'INTERVENTION|[\n\r])", first_page_text, re.IGNORECASE)
@@ -407,78 +401,93 @@ def parse_pdf_file(uploaded_file):
         if not site_info["name"]: 
             site_info["name"] = uploaded_file.name.split(".")[0]
 
-        # 4. LOCALISATION DU BON DE COMMANDE (toutes les pages à partir de BON DE COMMANDE jusqu'à la fin)
+        # 4. LOCALISATION DYNAMIQUE DU BON DE COMMANDE (quelle que soit la page du PDF)
         bdc_start_idx = -1
-        for idx in range(total_pages - 1, -1, -1):
-            p_text = pdf.pages[idx].extract_text() or ""
-            if "BON DE COMMANDE" in p_text.upper():
+        for idx in range(total_pages):
+            p_text_up = (pdf.pages[idx].extract_text() or "").upper()
+            if "BON DE COMMANDE" in p_text_up and "VALIDATION DU BON DE COMMANDE" not in p_text_up:
                 bdc_start_idx = idx
                 break
+
+        # Sécurité si un Bon de Commande tient sur 1 seule page avec la validation en bas
+        if bdc_start_idx == -1:
+            for idx in range(total_pages):
+                p_text_up = (pdf.pages[idx].extract_text() or "").upper()
+                if "BON DE COMMANDE" in p_text_up and ("LISTE DES MESURES" in p_text_up or "ZSE" in p_text_up):
+                    bdc_start_idx = idx
+                    break
 
         if bdc_start_idx != -1:
             target_pages = pdf.pages[bdc_start_idx:]
         else:
             target_pages = pdf.pages[-2:] if total_pages >= 2 else pdf.pages
 
-        # Récupération de TOUS les tableaux des pages du Bon de Commande (y compris page 2 sans en-tête)
-        tables = []
+        # Lecture ligne par ligne sur TOUTES les pages du Bon de Commande
+        bdc_lines = []
         for p in target_pages:
-            p_tables = p.extract_tables()
-            if p_tables:
-                for t in p_tables:
-                    tables.append(t)
+            p_text = p.extract_text(layout=False) or ""
+            for line in p_text.splitlines():
+                if line.strip():
+                    bdc_lines.append(line.strip())
 
         current_zone = "Phase 1"
 
-        for table in tables:
-            for row in table:
-                if not row or not any(row):
-                    continue
+        for line in bdc_lines:
+            upper_line = line.upper()
+
+            if any(skip in upper_line for skip in [
+                "BOULEVARD ANTOINE LACAZE",
+                "ANALYSES - DIAGNOSTICS",
+                "CLIENT:",
+                "CLIENT :",
+                "ADRESSE D'INTERVENTION",
+                "BON DE COMMANDE",
+                "LISTE DES MESURES",
+                "ELECTRICITÉ SUR SITE",
+                "AUTRE(S) MESURE(S)",
+                "INFORMATION(S) SUR LE CHANTIER",
+                "FOR-070"
+            ]):
+                continue
+
+            extracted_z = extract_zone_num(line)
+            if extracted_z:
+                current_zone = extracted_z
+
+            suivi_key = clean_suivi_zone_name(current_zone)
+            if current_zone not in phase_pair_objs:
+                phase_pair_objs[current_zone] = {}
+
+            # Nettoyage OCR des codes (ex: "Ο (1)" ou "0 (1)" -> "Q (1)")
+            normalized_line = re.sub(r"(?:^|\s)[Ο0]\s*\(\s*(\d+)\s*\)", r" Q (\1)", line)
+
+            # Extraction de tous les codes de mesure de la ligne
+            codes_found = re.findall(r"\b([A-Z]+(?:-[A-Z0-9]+)?)\s*\(\s*(\d+)\s*\)", normalized_line)
+            for code, qty_str in codes_found:
+                qty = int(qty_str)
+                code = code.upper()
                 
-                cell_zse = str(row[0]).strip() if len(row) > 0 and row[0] else ""
-                full_row_text = " ".join([str(c) for c in row if c])
+                if any(code.startswith(letter) for letter in ["D", "E", "G", "U", "V", "X", "Y"]):
+                    phase_pair_objs[current_zone][code] = phase_pair_objs[current_zone].get(code, 0) + qty
+                elif code == "J-PROC":
+                    total_j_proc += qty
+                else:
+                    if suivi_key not in suivi_zones:
+                        suivi_zones[suivi_key] = {"measures": {}, "j_proc": 0}
+                    measures = suivi_zones[suivi_key]["measures"]
+                    measures[code] = measures.get(code, 0) + qty
 
-                if any(skip in full_row_text.upper() for skip in ["BON DE COMMANDE", "VALIDATION DU BON DE COMMANDE", "ELECTRICITÉ SUR SITE"]):
-                    continue
-
-                extracted_z = extract_zone_num(cell_zse) or extract_zone_num(full_row_text)
-                if extracted_z:
-                    current_zone = extracted_z
-
-                suivi_key = clean_suivi_zone_name(current_zone)
-
-                if current_zone not in phase_pair_objs:
-                    phase_pair_objs[current_zone] = {}
-
-                # Nettoyage OCR avant détection des codes (ex: "Ο (1)" ou "0 (1)" -> "Q (1)")
-                normalized_row = re.sub(r"(?:^|\s)[Ο0]\s*\(\s*(\d+)\s*\)", r" Q (\1)", full_row_text)
-
-                codes_found = re.findall(r"\b([A-Z]+(?:-[A-Z0-9]+)?)\s*\(\s*(\d+)\s*\)", normalized_row)
-                for code, qty_str in codes_found:
-                    qty = int(qty_str)
-                    code = code.upper()
-                    
-                    if any(code.startswith(letter) for letter in ["D", "E", "G", "U", "V", "X", "Y"]):
-                        phase_pair_objs[current_zone][code] = phase_pair_objs[current_zone].get(code, 0) + qty
-                    elif code == "J-PROC":
-                        total_j_proc += qty
-                    else:
-                        if suivi_key not in suivi_zones:
-                            suivi_zones[suivi_key] = {"measures": {}, "j_proc": 0}
-                        measures = suivi_zones[suivi_key]["measures"]
-                        measures[code] = measures.get(code, 0) + qty
-
-                # Détection des processus opérateurs (ex: "PROCESSUS PS 26-3 - DEPOSSE JOINT VITRIER")
-                for cell in row:
-                    if cell and ("PRO" in str(cell).upper() or "PROCESSUS" in str(cell).upper()):
-                        proc_clean = re.sub(r"\s+", " ", str(cell)).strip()
-                        if (
-                            proc_clean
-                            and proc_clean not in process_names
-                            and not re.match(r"^J-PROC", proc_clean, re.I)
-                            and proc_clean.upper() != "MESURE SUR OPÉRATEUR"
-                        ):
-                            process_names.append(proc_clean)
+            # Détection des processus opérateurs
+            if "PROCESSUS" in upper_line or re.search(r"\bPRO\b", upper_line):
+                proc_clean = re.sub(r"\s+\d+\s+\d+\s+J-PROC.*$", "", line, flags=re.IGNORECASE).strip()
+                proc_clean = re.sub(r"\s+", " ", proc_clean).strip()
+                if (
+                    proc_clean
+                    and proc_clean not in process_names
+                    and not re.match(r"^J-PROC", proc_clean, re.I)
+                    and "MESURE SUR OPÉRATEUR" not in proc_clean.upper()
+                ):
+                    process_names.append(proc_clean)
 
     for zone in suivi_zones:
         suivi_zones[zone]["j_proc"] = total_j_proc
