@@ -145,7 +145,6 @@ except Exception:
 BASE_URL = "https://ws.synchroteam.com/api/v3"
 HISTORY_FILE = "import_history.json"
 
-# Construction de l'authentification Basic Auth Synchroteam
 auth_str = f"{SYNCHROTEAM_DOMAIN}:{SYNCHROTEAM_API_KEY}"
 b64_auth = base64.b64encode(auth_str.encode()).decode()
 
@@ -155,7 +154,6 @@ HEADERS = {
     "Accept": "application/json",
 }
 
-# Header de fallback si le domaine est géré directement par le serveur
 auth_str_alt = f"{SYNCHROTEAM_API_KEY}:"
 b64_auth_alt = base64.b64encode(auth_str_alt.encode()).decode()
 HEADERS_ALT = {
@@ -177,14 +175,13 @@ def build_url(endpoint):
 
 def safe_get(endpoint):
     url = build_url(endpoint)
-    # Essai 1 : Authorization domain:api_key
+    res = None
     try:
         res = requests.get(url, headers=HEADERS, timeout=10)
         if res.status_code == 200:
             return res
     except Exception:
         pass
-    # Essai 2 : Authorization api_key:
     try:
         res = requests.get(url, headers=HEADERS_ALT, timeout=10)
         if res.status_code == 200:
@@ -325,24 +322,29 @@ def extract_zone_num(text):
     if not text:
         return None
     
-    if any(k in text.upper() for k in ["LISTE DES MESURES", "DURÉE", "OBJECTIF", "TYPE", "MESURE SUR OPÉRATEUR"]):
+    upper_t = text.upper()
+    if any(k in upper_t for k in ["LISTE DES MESURES", "DURÉE", "OBJECTIF", "TYPE", "MESURE SUR OPÉRATEUR", "DATE / HEURE"]):
         return None
 
-    m = re.search(r"((?:[^\n]+?-\s*)?(?:PHASE|ZONE|ZSE)\s*#?\s*[\d\.]+)", text, re.IGNORECASE)
+    # Normalisation OCR fréquente (ex: Phase IA -> Phase 1A, Phase IB -> Phase 1B)
+    cleaned = re.sub(r"\bPhase\s*I([A-Z])\b", r"Phase 1\1", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*#\s*ZSE[A-Z0-9]*", "", cleaned, flags=re.IGNORECASE).strip()
+
+    # Capture ex: "ETATS INITIAUX - Zone 1 Phase 1A", "FIN DE CHANTIER - Zone 1 Phase 1A", "SUIVI DE CHANTIER - Zone 1 Phase 1A"
+    m = re.search(r"((?:[^\n-]+?-\s*)?(?:ZONE|PHASE)\s*\d+(?:\s*Phase\s*[A-Z0-9]+)?)", cleaned, re.IGNORECASE)
     if m:
-        return m.group(1).strip()
+        return re.sub(r"\s+", " ", m.group(1)).strip()
     return None
 
 def clean_suivi_zone_name(raw_text):
     if not raw_text:
         return "SUIVI DE CHANTIER - ZONE 1"
     
-    m = re.search(r"((?:SUIVI DE CHANTIER\s*-\s*)?(?:ZONE|PHASE|ZSE)\s*#?\s*\d+)", raw_text, re.IGNORECASE)
+    cleaned = re.sub(r"\bPhase\s*I([A-Z])\b", r"Phase 1\1", raw_text, flags=re.IGNORECASE)
+    m = re.search(r"((?:ZONE|PHASE)\s*\d+(?:\s*Phase\s*[A-Z0-9]+)?)", cleaned, re.IGNORECASE)
     if m:
-        title = m.group(1).strip()
-        if not title.upper().startswith("SUIVI DE CHANTIER"):
-            title = f"SUIVI DE CHANTIER - {title}"
-        return title.upper()
+        title = re.sub(r"\s+", " ", m.group(1)).strip()
+        return f"SUIVI DE CHANTIER - {title}".upper()
     return "SUIVI DE CHANTIER - ZONE 1"
 
 def parse_pdf_file(uploaded_file):
@@ -355,30 +357,45 @@ def parse_pdf_file(uploaded_file):
     with pdfplumber.open(uploaded_file) as pdf:
         total_pages = len(pdf.pages)
         
+        first_page_text = pdf.pages[0].extract_text() or ""
         full_text = ""
         for p in pdf.pages:
             t = p.extract_text()
             if t:
                 full_text += t + "\n"
 
-        client_m = re.search(r"CLIENT\s*:\s*([^\n\r]+)", full_text, re.IGNORECASE)
+        # 1. CLIENT : arrêt strict avant DOSSIER N°, ADRESSE ou fin de ligne
+        client_m = re.search(r"CLIENT\s*:\s*(.+?)(?=\s+DOSSIER\s*N°|\s+ADRESSE\s*D'INTERVENTION|[\n\r])", first_page_text, re.IGNORECASE)
         if client_m: 
             raw_client = client_m.group(1).strip()
             site_info["client"] = re.split(r"[\(-]", raw_client)[0].strip()
 
-        dossier_m = re.search(r"DOSSIER\s*N°\s*:\s*([^\n(]+)\s*\(([^)]+)\)", full_text, re.IGNORECASE)
+        # 2. DOSSIER & RÉFÉRENCE
+        dossier_m = re.search(r"DOSSIER\s*N°\s*:\s*([^\n(]+)\s*\(([^)]+)\)", first_page_text, re.IGNORECASE)
         if dossier_m:
             site_info["name"] = dossier_m.group(1).strip()
             site_info["myid"] = dossier_m.group(2).strip()
 
-        adresse_m = re.search(r"ADRESSE D'INTERVENTION\s*:\s*([\s\S]+?)(?=\n\n|\n[A-Z\s]{4,}:|BON DE COMMANDE|$)", full_text, re.IGNORECASE)
+        # 3. ADRESSE D'INTERVENTION : extraction exacte du cartouche vert jusqu'au code postal + ville
+        adresse_m = re.search(
+            r"ADRESSE\s*D'INTERVENTION\s*:\s*([\s\S]+?\b\d{5}\s+[A-ZÀ-ÿ0-9\s\-']+?)(?=\s*(?:\n|STRATEGIE|DOSSIER\s*N°|BON\s*DE\s*COMMANDE|$))",
+            first_page_text,
+            re.IGNORECASE
+        )
+        if not adresse_m:
+            adresse_m = re.search(
+                r"ADRESSE\s*D'INTERVENTION\s*:\s*([\s\S]+?)(?=\nSTRATEGIE|\nDOSSIER|\n[A-Z\s]{4,}:|$)",
+                first_page_text,
+                re.IGNORECASE
+            )
+
         if adresse_m:
             raw_addr_block = adresse_m.group(1).strip()
             clean_addr_full = re.sub(r"\s+", " ", raw_addr_block).strip()
             
-            cp_ville_m = re.search(r"(\d{5})\s+(.+)", clean_addr_full)
+            cp_ville_m = re.search(r"(\d{5})\s+(.+)$", clean_addr_full)
             if cp_ville_m:
-                site_info["zip"] = cp_ville_m.group(1)
+                site_info["zip"] = cp_ville_m.group(1).strip()
                 site_info["city"] = cp_ville_m.group(2).strip()
                 street_m = re.search(r"^(.*?)\s*\d{5}", clean_addr_full)
                 site_info["address"] = street_m.group(1).strip() if street_m and street_m.group(1).strip() else clean_addr_full
@@ -390,6 +407,7 @@ def parse_pdf_file(uploaded_file):
         if not site_info["name"]: 
             site_info["name"] = uploaded_file.name.split(".")[0]
 
+        # 4. LOCALISATION DU BON DE COMMANDE (toutes les pages à partir de BON DE COMMANDE jusqu'à la fin)
         bdc_start_idx = -1
         for idx in range(total_pages - 1, -1, -1):
             p_text = pdf.pages[idx].extract_text() or ""
@@ -398,19 +416,16 @@ def parse_pdf_file(uploaded_file):
                 break
 
         if bdc_start_idx != -1:
-            target_pages = pdf.pages[bdc_start_idx:min(bdc_start_idx + 2, total_pages)]
+            target_pages = pdf.pages[bdc_start_idx:]
         else:
             target_pages = pdf.pages[-2:] if total_pages >= 2 else pdf.pages
 
+        # Récupération de TOUS les tableaux des pages du Bon de Commande (y compris page 2 sans en-tête)
         tables = []
         for p in target_pages:
             p_tables = p.extract_tables()
-            if not p_tables:
-                continue
-
-            for t in p_tables:
-                t_str = " ".join([" ".join([str(c) for c in r if c]) for r in t])
-                if any(kw in t_str.upper() for kw in ["BON DE COMMANDE", "LISTE DES MESURES", "DURÉE", "OBJECTIF"]):
+            if p_tables:
+                for t in p_tables:
                     tables.append(t)
 
         current_zone = "Phase 1"
@@ -420,10 +435,10 @@ def parse_pdf_file(uploaded_file):
                 if not row or not any(row):
                     continue
                 
-                cell_zse = row[0].strip() if len(row) > 0 and row[0] else ""
+                cell_zse = str(row[0]).strip() if len(row) > 0 and row[0] else ""
                 full_row_text = " ".join([str(c) for c in row if c])
 
-                if "BON DE COMMANDE" in full_row_text.upper():
+                if any(skip in full_row_text.upper() for skip in ["BON DE COMMANDE", "VALIDATION DU BON DE COMMANDE", "ELECTRICITÉ SUR SITE"]):
                     continue
 
                 extracted_z = extract_zone_num(cell_zse) or extract_zone_num(full_row_text)
@@ -435,9 +450,13 @@ def parse_pdf_file(uploaded_file):
                 if current_zone not in phase_pair_objs:
                     phase_pair_objs[current_zone] = {}
 
-                codes_found = re.findall(r"\b([A-Z]+(?:-[A-Z0-9]+)?)\s*\(\s*(\d+)\s*\)", full_row_text)
+                # Nettoyage OCR avant détection des codes (ex: "Ο (1)" ou "0 (1)" -> "Q (1)")
+                normalized_row = re.sub(r"(?:^|\s)[Ο0]\s*\(\s*(\d+)\s*\)", r" Q (\1)", full_row_text)
+
+                codes_found = re.findall(r"\b([A-Z]+(?:-[A-Z0-9]+)?)\s*\(\s*(\d+)\s*\)", normalized_row)
                 for code, qty_str in codes_found:
                     qty = int(qty_str)
+                    code = code.upper()
                     
                     if any(code.startswith(letter) for letter in ["D", "E", "G", "U", "V", "X", "Y"]):
                         phase_pair_objs[current_zone][code] = phase_pair_objs[current_zone].get(code, 0) + qty
@@ -449,10 +468,16 @@ def parse_pdf_file(uploaded_file):
                         measures = suivi_zones[suivi_key]["measures"]
                         measures[code] = measures.get(code, 0) + qty
 
+                # Détection des processus opérateurs (ex: "PROCESSUS PS 26-3 - DEPOSSE JOINT VITRIER")
                 for cell in row:
                     if cell and ("PRO" in str(cell).upper() or "PROCESSUS" in str(cell).upper()):
                         proc_clean = re.sub(r"\s+", " ", str(cell)).strip()
-                        if proc_clean and proc_clean not in process_names and not re.match(r"^J-PROC", proc_clean, re.I):
+                        if (
+                            proc_clean
+                            and proc_clean not in process_names
+                            and not re.match(r"^J-PROC", proc_clean, re.I)
+                            and proc_clean.upper() != "MESURE SUR OPÉRATEUR"
+                        ):
                             process_names.append(proc_clean)
 
     for zone in suivi_zones:
